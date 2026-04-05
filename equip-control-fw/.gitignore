@@ -6,7 +6,5 @@ Release/
 .DS_Store
 
 # CubeIDE IDE 종속 설정
-.cproject
-.project
 .settings/
 .osx.project
