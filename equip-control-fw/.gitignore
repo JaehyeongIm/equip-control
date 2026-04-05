@@ -8,3 +8,4 @@ Release/
 # CubeIDE IDE 종속 설정
 .settings/
 .osx.project
+*.launch
