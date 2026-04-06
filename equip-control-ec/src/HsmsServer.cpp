@@ -169,8 +169,9 @@ void HsmsServer::sessionLoop(SocketFd clientFd) {
                     handleS1F1(sysBytes);
                 else if (stream == 1 && function == 13)
                     handleS1F13(sysBytes, body, bodyLen);
-                else if (stream == 2 && function == 41)
+                else if (stream == 2 && function == 41) {
                     handleS2F41(sysBytes, body, bodyLen);
+                }
             }
 
             rxBuf.erase(rxBuf.begin(), rxBuf.begin() + 4 + length);
@@ -254,6 +255,7 @@ void HsmsServer::handleS1F13(uint32_t sysBytes, const uint8_t* /*body*/, uint16_
 }
 
 void HsmsServer::handleS2F41(uint32_t sysBytes, const uint8_t* body, uint16_t len) {
+    
     if (m_state != HsmsSessionState::SELECTED) return;
 
     std::string rcmd;
