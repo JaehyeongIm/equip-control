@@ -29,7 +29,7 @@ void StateMachine::processEvent(EquipEvent e) {
         break;
 
     case EquipEvent::CMD_RESET:
-        if (m_state == EquipState::ALARM || m_state == EquipState::ERROR)
+        if (m_state == EquipState::ALARM || m_state == EquipState::ERROR_STATE)
             transition(EquipState::IDLE);
         break;
 
@@ -40,7 +40,7 @@ void StateMachine::processEvent(EquipEvent e) {
 
     case EquipEvent::EVENT_ERROR:
         // 어느 상태에서든 ERROR로 전이
-        transition(EquipState::ERROR);
+        transition(EquipState::ERROR_STATE);
         break;
 
     case EquipEvent::ALARM_CLEAR:

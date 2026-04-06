@@ -5,6 +5,11 @@
 #include <atomic>
 #include <thread>
 #include <cstdint>
+#ifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#  undef ERROR   // windows.h의 ERROR 매크로가 EquipState::ERROR와 충돌
+#endif
 
 // STM32로부터 수신한 프레임 콜백 타입
 using FrameCallback = std::function<void(const ParsedFrame&)>;
@@ -40,7 +45,11 @@ private:
     bool writeBytes(const uint8_t* buf, int len);
 
     std::string            m_port;
+#ifdef _WIN32
+    HANDLE                 m_fd;
+#else
     int                    m_fd;
+#endif
     uint8_t                m_txSeq;
 
     FrameCallback          m_callback;

@@ -15,3 +15,7 @@ add_executable(ec
 )
 
 target_compile_options(ec PRIVATE -Wall -Wextra)
+
+if(WIN32)
+    target_link_libraries(ec ws2_32)
+endif()

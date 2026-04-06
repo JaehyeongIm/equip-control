@@ -1,12 +1,15 @@
 #pragma once
 #include <functional>
 #include <cstdint>
+#ifdef ERROR
+#  undef ERROR  // windows.h의 ERROR 매크로 충돌 방지
+#endif
 
 enum class EquipState {
     IDLE    = 0,
     RUNNING = 1,
     ALARM   = 2,
-    ERROR   = 3,
+    ERROR_STATE = 3,
 };
 
 enum class EquipEvent {

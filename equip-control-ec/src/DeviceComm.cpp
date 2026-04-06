@@ -1,13 +1,22 @@
 #include "DeviceComm.h"
 #include <chrono>
 #include <cstring>
-#include <fcntl.h>
-#include <termios.h>
-#include <unistd.h>
+
+#ifndef _WIN32
+#  include <fcntl.h>
+#  include <termios.h>
+#  include <unistd.h>
+#endif
 
 // ── 생성자 / 소멸자 ─────────────────────────────────────────────
 DeviceComm::DeviceComm(const std::string& portName, uint32_t /*baudRate*/)
-    : m_port(portName), m_fd(-1), m_txSeq(0),
+    : m_port(portName),
+#ifdef _WIN32
+      m_fd(INVALID_HANDLE_VALUE),
+#else
+      m_fd(-1),
+#endif
+      m_txSeq(0),
       m_running(false), m_lastRxMs(0),
       m_parseState(ParseState::WAIT_SOF), m_parseIdx(0)
 {}
@@ -16,6 +25,32 @@ DeviceComm::~DeviceComm() { close(); }
 
 // ── UART 열기 ───────────────────────────────────────────────────
 bool DeviceComm::open() {
+#ifdef _WIN32
+    // Windows: COM 포트는 "\\\\.\\COMx" 형식
+    std::string path = "\\\\.\\" + m_port;
+    m_fd = CreateFileA(path.c_str(),
+                       GENERIC_READ | GENERIC_WRITE,
+                       0, nullptr, OPEN_EXISTING,
+                       FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (m_fd == INVALID_HANDLE_VALUE) return false;
+
+    DCB dcb{};
+    dcb.DCBlength = sizeof(dcb);
+    GetCommState(m_fd, &dcb);
+    dcb.BaudRate = CBR_115200;
+    dcb.ByteSize = 8;
+    dcb.Parity   = NOPARITY;
+    dcb.StopBits = ONESTOPBIT;
+    SetCommState(m_fd, &dcb);
+
+    COMMTIMEOUTS to{};
+    to.ReadIntervalTimeout         = 10;
+    to.ReadTotalTimeoutConstant    = 100;
+    to.ReadTotalTimeoutMultiplier  = 0;
+    to.WriteTotalTimeoutConstant   = 100;
+    to.WriteTotalTimeoutMultiplier = 0;
+    SetCommTimeouts(m_fd, &to);
+#else
     m_fd = ::open(m_port.c_str(), O_RDWR | O_NOCTTY | O_SYNC);
     if (m_fd < 0) return false;
 
@@ -32,6 +67,7 @@ bool DeviceComm::open() {
     tty.c_cc[VMIN]  = 1;
     tty.c_cc[VTIME] = 0;
     tcsetattr(m_fd, TCSANOW, &tty);
+#endif
 
     m_running = true;
     m_rxThread = std::thread(&DeviceComm::rxLoop, this);
@@ -41,10 +77,20 @@ bool DeviceComm::open() {
 void DeviceComm::close() {
     m_running = false;
     if (m_rxThread.joinable()) m_rxThread.join();
+#ifdef _WIN32
+    if (m_fd != INVALID_HANDLE_VALUE) { CloseHandle(m_fd); m_fd = INVALID_HANDLE_VALUE; }
+#else
     if (m_fd >= 0) { ::close(m_fd); m_fd = -1; }
+#endif
 }
 
-bool DeviceComm::isOpen() const { return m_fd >= 0; }
+bool DeviceComm::isOpen() const {
+#ifdef _WIN32
+    return m_fd != INVALID_HANDLE_VALUE;
+#else
+    return m_fd >= 0;
+#endif
+}
 
 void DeviceComm::setFrameCallback(FrameCallback cb) { m_callback = std::move(cb); }
 
@@ -78,7 +124,7 @@ uint16_t DeviceComm::buildFrame(uint8_t type, uint8_t seq,
     return static_cast<uint16_t>(7U + payloadLen);
 }
 
-// ── 1바이트 파서: 펌웨어의 frame_parser_feed와 동일 로직 ─────────
+// ── 1바이트 파서 ─────────────────────────────────────────────────
 bool DeviceComm::parserFeed(uint8_t byte, ParsedFrame& out) {
     switch (m_parseState) {
     case ParseState::WAIT_SOF:
@@ -109,13 +155,12 @@ bool DeviceComm::parserFeed(uint8_t byte, ParsedFrame& out) {
             m_parseState = ParseState::CRC_L;
         break;
     case ParseState::CRC_L:
-        m_parseFrame.payload[m_parseFrame.len] = byte;  // 임시 보관
+        m_parseFrame.payload[m_parseFrame.len] = byte;
         m_parseState = ParseState::CRC_H;
         break;
     case ParseState::CRC_H: {
         uint16_t rxCrc = m_parseFrame.payload[m_parseFrame.len]
                        | (static_cast<uint16_t>(byte) << 8);
-        // header(type+seq+len_l+len_h) + payload 전체 CRC 계산
         uint8_t hdr[4] = { m_parseFrame.type, m_parseFrame.seq,
                            static_cast<uint8_t>(m_parseFrame.len & 0xFF),
                            static_cast<uint8_t>(m_parseFrame.len >> 8) };
@@ -134,7 +179,7 @@ bool DeviceComm::parserFeed(uint8_t byte, ParsedFrame& out) {
     return false;
 }
 
-// ── RX 스레드: 바이트 수신 → 파서 → 콜백 ───────────────────────
+// ── RX 스레드 ───────────────────────────────────────────────────
 void DeviceComm::rxLoop() {
     uint8_t byte;
     while (m_running) {
@@ -150,7 +195,7 @@ void DeviceComm::rxLoop() {
     }
 }
 
-// ── sendCommand: 전송 + ACK 대기 + 최대 3회 재전송 ─────────────
+// ── sendCommand ─────────────────────────────────────────────────
 bool DeviceComm::sendCommand(uint8_t type, const uint8_t* payload, uint16_t len) {
     uint8_t  buf[PROTO_MAX_FRAME];
     uint16_t frameLen = buildFrame(type, m_txSeq, payload, len, buf);
@@ -158,7 +203,6 @@ bool DeviceComm::sendCommand(uint8_t type, const uint8_t* payload, uint16_t len)
     std::atomic<bool> acked{false};
     uint8_t expectedSeq = m_txSeq;
 
-    // 기존 콜백 보존, ACK 감시 콜백으로 임시 교체
     auto prev = m_callback;
     setFrameCallback([&](const ParsedFrame& f) {
         if (f.type == MSG_ACK && f.payload[0] == expectedSeq)
@@ -185,11 +229,23 @@ bool DeviceComm::sendCommand(uint8_t type, const uint8_t* payload, uint16_t len)
     return ok;
 }
 
-// ── 플랫폼 UART I/O (POSIX — Windows 포팅 시 HANDLE로 교체) ────
+// ── 플랫폼 UART I/O ─────────────────────────────────────────────
 int DeviceComm::readBytes(uint8_t* buf, int len) {
+#ifdef _WIN32
+    DWORD read = 0;
+    ReadFile(m_fd, buf, len, &read, nullptr);
+    return static_cast<int>(read);
+#else
     return static_cast<int>(::read(m_fd, buf, len));
+#endif
 }
 
 bool DeviceComm::writeBytes(const uint8_t* buf, int len) {
+#ifdef _WIN32
+    DWORD written = 0;
+    WriteFile(m_fd, buf, len, &written, nullptr);
+    return static_cast<int>(written) == len;
+#else
     return ::write(m_fd, buf, len) == len;
+#endif
 }
