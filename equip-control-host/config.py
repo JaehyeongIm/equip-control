@@ -1,4 +1,4 @@
-EC_HOST = "127.0.0.1"
+EC_HOST = "192.168.45.3"
 EC_PORT = 5000
 
 HSMS_T3_SEC = 45    # Reply timeout
