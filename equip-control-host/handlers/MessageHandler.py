@@ -115,7 +115,8 @@ class MessageHandler:
 
     # ── S2F42 Command Ack ─────────────────────────────────────────
     def _handle_s2f42(self, body: bytes):
-        hcack  = body[2] if len(body) > 2 else 0xFF
+        # body: L[2]{Boolean HCACK, L[0]} → HCACK는 body[4]
+        hcack  = body[4] if len(body) > 4 else 0xFF
         result = "ACK" if hcack == 0x00 else f"NACK(0x{hcack:02X})"
         self._add_event(f"S2F42 {result}")
         logger.info("S2F42: %s", result)

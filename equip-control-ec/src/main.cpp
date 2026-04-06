@@ -32,10 +32,22 @@ int main(int argc, char* argv[]) {
         std::cout << "[SM] " << names[static_cast<int>(prev)]
                   << " → " << names[static_cast<int>(next)] << "\n";
 
-        if (next == EquipState::RUNNING)
+        if (next == EquipState::RUNNING) {
+            // STM32 팬(LD2) ON
+            CmdFanPayload fanOn{ 1 };
+            devComm.sendCommand(MSG_CMD_FAN,
+                                reinterpret_cast<const uint8_t*>(&fanOn),
+                                sizeof(fanOn));
             hsmsSrv.sendEventReport(3U, nullptr, 0);  // CEID-3 ProcessStart
-        else if (next == EquipState::IDLE && prev == EquipState::RUNNING)
-            hsmsSrv.sendEventReport(4U, nullptr, 0);  // CEID-4 ProcessComplete
+        } else if (next == EquipState::IDLE) {
+            // STM32 팬(LD2) OFF
+            CmdFanPayload fanOff{ 0 };
+            devComm.sendCommand(MSG_CMD_FAN,
+                                reinterpret_cast<const uint8_t*>(&fanOff),
+                                sizeof(fanOff));
+            if (prev == EquipState::RUNNING)
+                hsmsSrv.sendEventReport(4U, nullptr, 0);  // CEID-4 ProcessComplete
+        }
     });
 
     // ── AlarmManager → S5F1 알람 보고 ─────────────────────────
