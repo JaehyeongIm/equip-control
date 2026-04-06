@@ -11,6 +11,7 @@ add_executable(ec
     src/DeviceComm.cpp
     src/StateMachine.cpp
     src/AlarmManager.cpp
+    src/HsmsServer.cpp
 )
 
 target_compile_options(ec PRIVATE -Wall -Wextra)
