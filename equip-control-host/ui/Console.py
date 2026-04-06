@@ -1,8 +1,11 @@
 """
 CLI 상태 표시 + 명령 입력 (SDD 6.3)
-입력 직전에 화면을 렌더링하여 타이핑 중 화면 갱신 충돌 방지
+백그라운드 스레드가 1초마다 화면 갱신
 """
 import os
+import sys
+import threading
+import time
 from dataclasses import dataclass, field
 from typing import List, Set, Callable
 
@@ -20,12 +23,17 @@ class AppState:
 
 
 class Console:
+    REFRESH_INTERVAL = 1.0  # 초
+
     def __init__(self, state: AppState, on_command: Callable[[str], None]):
         self._state      = state
         self._on_command = on_command
+        self._lock       = threading.Lock()
+        self._running    = False
+        self._bg_thread  = None
 
     def _render(self):
-        os.system("clear")
+        os.system("cls" if os.name == "nt" else "clear")
         s = self._state
         alarm_ids = ", ".join(str(a) for a in sorted(s.active_alarms)) \
                     if s.active_alarms else "없음"
@@ -46,24 +54,42 @@ class Console:
             print(f"  {ev}")
         print("-" * 52)
         print("Commands: START | STOP | RESET | ACK_ALARM <alid> | QUIT")
+        print("> ", end="", flush=True)
+
+    def _bg_refresh(self):
+        while self._running:
+            time.sleep(self.REFRESH_INTERVAL)
+            if self._running:
+                with self._lock:
+                    self._render()
 
     def start_display(self):
-        pass  # 백그라운드 렌더링 불필요 — 입력 직전에 렌더링
+        self._running = True
+        self._bg_thread = threading.Thread(target=self._bg_refresh, daemon=True)
+        self._bg_thread.start()
 
     def run_input_loop(self):
-        """매 입력마다 화면 갱신 후 프롬프트 표시"""
+        self._render()
         while True:
-            self._render()
             try:
-                line = input("> ").strip()
-            except (EOFError, KeyboardInterrupt):
+                line = sys.stdin.readline()
+                if not line:  # EOF
+                    break
+                line = line.strip()
+            except KeyboardInterrupt:
                 print("\n[Host] 종료합니다.")
                 break
 
             if not line:
+                with self._lock:
+                    self._render()
                 continue
 
             if line.upper() == "QUIT":
                 break
 
             self._on_command(line)
+            with self._lock:
+                self._render()
+
+        self._running = False
