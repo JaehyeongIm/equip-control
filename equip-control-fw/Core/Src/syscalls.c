@@ -29,6 +29,7 @@
 #include <time.h>
 #include <sys/time.h>
 #include <sys/times.h>
+#include "stm32f4xx.h"
 
 
 /* Variables */
@@ -80,14 +81,11 @@ __attribute__((weak)) int _read(int file, char *ptr, int len)
 __attribute__((weak)) int _write(int file, char *ptr, int len)
 {
   (void)file;
-  int DataIdx;
-
-  for (DataIdx = 0; DataIdx < len; DataIdx++)
-  {
-    __io_putchar(*ptr++);
-  }
+  for (int i = 0; i < len; i++)
+    ITM_SendChar((uint32_t)*ptr++);
   return len;
 }
+
 
 int _close(int file)
 {

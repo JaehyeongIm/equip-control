@@ -85,7 +85,15 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
+  /* ITM 수동 초기화 — SWV 출력용 */
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  ITM->LAR  = 0xC5ACCE55UL;
+  ITM->TCR  = 0x0001000DUL;
+  ITM->TPR  = 0xFFFFFFFFUL;
+  ITM->TER  = 0x00000001UL;
+  /* ITM 동작 확인용 — 콘솔에 "BOOT\r\n" 이 보이면 SWV 정상 */
+  const char *msg = "BOOT\r\n";
+  for (int i = 0; msg[i]; i++) ITM_SendChar((uint32_t)msg[i]);
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */

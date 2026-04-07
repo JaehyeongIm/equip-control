@@ -169,8 +169,10 @@ void HsmsServer::sessionLoop(SocketFd clientFd) {
                     handleS1F1(sysBytes);
                 else if (stream == 1 && function == 13)
                     handleS1F13(sysBytes, body, bodyLen);
-                else if (stream == 2 && function == 41)
+                else if (stream == 2 && function == 41) {
                     handleS2F41(sysBytes, body, bodyLen);
+
+                }
             }
 
             rxBuf.erase(rxBuf.begin(), rxBuf.begin() + 4 + length);
@@ -250,10 +252,11 @@ void HsmsServer::handleS1F13(uint32_t sysBytes, const uint8_t* /*body*/, uint16_
     uint8_t body[] = { 0x01, 0x02, 0x21, 0x01, 0x00, 0x01, 0x00 };
     auto msg = buildDataMsg(m_sessionId, 1, 14, sysBytes, body, sizeof(body));
     sendRaw(msg.data(), static_cast<int>(msg.size()));
-    std::cout << "[HSMS] S1F14 sent — communication established\n";
+    std::cout << "[HSMS] S1F14 sent communication established\n";
 }
 
 void HsmsServer::handleS2F41(uint32_t sysBytes, const uint8_t* body, uint16_t len) {
+    // std::cout << "handleS2F41 진입";
     if (m_state != HsmsSessionState::SELECTED) return;
 
     std::string rcmd;
@@ -308,7 +311,6 @@ void HsmsServer::sendAlarmReport(uint8_t alid, bool isSet, const std::string& te
 void HsmsServer::sendEventReport(uint32_t ceid,
                                  const uint8_t* rptData, uint16_t rptLen) {
     if (m_state != HsmsSessionState::SELECTED) return;
-
     std::vector<uint8_t> body;
     body.push_back(0x01); body.push_back(0x03);
     body.push_back(0xB1); body.push_back(0x04);

@@ -20,7 +20,12 @@
 #include "uart_comm.h"
 #include "watchdog_mgr.h"
 #include "gpio.h"
+#include "stm32f4xx.h"
 #include <string.h>
+
+static void dbg(const char *s) {
+    while (*s) ITM_SendChar((uint32_t)*s++);
+}
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -234,6 +239,8 @@ void StartTaskComm(void *argument)
       ParsedFrame_t frame;
       bool crcOk = frame_parser_feed(byte, &frame);
       if (crcOk) {
+        dbg("[COMM] frame rx\r\n");
+
         /* ACK 전송 */
         AckPayload_t ack = { .ack_seq = frame.seq };
         uint8_t txBuf[PROTO_MAX_FRAME];
@@ -246,6 +253,7 @@ void StartTaskComm(void *argument)
             frame.type == MSG_CMD_BUZZER ||
             frame.type == MSG_CMD_LED    ||
             frame.type == MSG_CMD_STATE_SYNC) {
+          dbg("[COMM] cmd queued\r\n");
           osMessageQueuePut(xQueueRxCmd, &frame, 0U, 0U);
         }
         /* Heartbeat REQ → ACK 응답 */
@@ -261,6 +269,7 @@ void StartTaskComm(void *argument)
     /* ── TX: 큐에서 요청 꺼내 전송 + ACK 대기/재전송 ── */
     TxRequest_t req;
     if (osMessageQueueGet(xQueueTxFrame, &req, NULL, 0U) == osOK) {
+      dbg("[COMM] tx start\r\n");
       uint8_t  txBuf[PROTO_MAX_FRAME];
       uint16_t len;
       uint8_t  retries = 0U;
@@ -282,6 +291,18 @@ void StartTaskComm(void *argument)
                   ackFrame.payload[0] == txSeq) {
                 acked = 1U;
                 break;
+              }
+              /* CMD 프레임이 도착하면 ACK 전송 + 큐에 전달 */
+              if (ackFrame.type == MSG_CMD_FAN    ||
+                  ackFrame.type == MSG_CMD_BUZZER ||
+                  ackFrame.type == MSG_CMD_LED    ||
+                  ackFrame.type == MSG_CMD_STATE_SYNC) {
+                AckPayload_t ack2 = { .ack_seq = ackFrame.seq };
+                uint8_t ackBuf[PROTO_MAX_FRAME];
+                uint16_t ackLen = frame_build(MSG_ACK, txSeq,
+                                              (uint8_t *)&ack2, sizeof(ack2), ackBuf);
+                uart_transmit_raw(ackBuf, ackLen);
+                osMessageQueuePut(xQueueRxCmd, &ackFrame, 0U, 0U);
               }
             }
           }
@@ -394,9 +415,14 @@ void StartTaskActuator(void *argument)
       case MSG_CMD_BUZZER:
         /* TODO: 부저 GPIO 제어 */
         break;
-      case MSG_CMD_LED:
-        /* TODO: 다색 LED 제어 */
+      case MSG_CMD_LED: {
+        CmdLedPayload_t *p = (CmdLedPayload_t *)frame.payload;
+        dbg("[ACTUATOR] MSG_CMD_LED\r\n");
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5,
+                          p->state ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        dbg(p->state ? "[ACTUATOR] LD2 ON\r\n" : "[ACTUATOR] LD2 OFF\r\n");
         break;
+      }
       default:
         break;
       }
@@ -420,6 +446,7 @@ void StartTaskHeartbeat(void *argument)
   {
     TxRequest_t req;
     watchdog_checkin(TASK_ID_HEARTBEAT);
+    dbg("[HB] tick\r\n");
     req.type       = MSG_HEARTBEAT_REQ;
     req.payloadLen = 0U;
     osMessageQueuePut(xQueueTxFrame, &req, 0U, 0U);

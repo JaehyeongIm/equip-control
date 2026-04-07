@@ -30,21 +30,24 @@ int main(int argc, char* argv[]) {
     sm.setStateChangeCallback([&](EquipState prev, EquipState next) {
         const char* names[] = {"IDLE", "RUNNING", "ALARM", "ERROR"};
         std::cout << "[SM] " << names[static_cast<int>(prev)]
-                  << " → " << names[static_cast<int>(next)] << "\n";
+                  << " -> " << names[static_cast<int>(next)] << "\n";
 
         if (next == EquipState::RUNNING) {
-            // STM32 팬(LD2) ON
-            CmdFanPayload fanOn{ 1 };
-            devComm.sendCommand(MSG_CMD_FAN,
-                                reinterpret_cast<const uint8_t*>(&fanOn),
-                                sizeof(fanOn));
+            // STM32 LD2(PA5) ON
+            std::cout << "LD2 ON" << std::endl;
+            CmdLedPayload ledOn{ 2 };
+            bool ok = devComm.sendCommand(MSG_CMD_LED,
+                                reinterpret_cast<const uint8_t*>(&ledOn),
+                                sizeof(ledOn));
+            std::cout << "[EC] sendCommand LED ON: " << (ok ? "ACK" : "TIMEOUT") << "\n";
             hsmsSrv.sendEventReport(3U, nullptr, 0);  // CEID-3 ProcessStart
         } else if (next == EquipState::IDLE) {
-            // STM32 팬(LD2) OFF
-            CmdFanPayload fanOff{ 0 };
-            devComm.sendCommand(MSG_CMD_FAN,
-                                reinterpret_cast<const uint8_t*>(&fanOff),
-                                sizeof(fanOff));
+            // STM32 LD2(PA5) OFF
+            CmdLedPayload ledOff{ 0 };
+            bool ok = devComm.sendCommand(MSG_CMD_LED,
+                                reinterpret_cast<const uint8_t*>(&ledOff),
+                                sizeof(ledOff));
+            std::cout << "[EC] sendCommand LED OFF: " << (ok ? "ACK" : "TIMEOUT") << "\n";
             if (prev == EquipState::RUNNING)
                 hsmsSrv.sendEventReport(4U, nullptr, 0);  // CEID-4 ProcessComplete
         }

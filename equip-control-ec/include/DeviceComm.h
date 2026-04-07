@@ -3,6 +3,7 @@
 #include <functional>
 #include <string>
 #include <atomic>
+#include <mutex>
 #include <thread>
 #include <cstdint>
 #ifdef _WIN32
@@ -53,6 +54,8 @@ private:
     uint8_t                m_txSeq;
 
     FrameCallback          m_callback;
+    std::mutex             m_callbackMutex;   // 콜백 교체 보호
+    std::mutex             m_sendMutex;       // sendCommand 재진입 방지
     std::thread            m_rxThread;
     std::atomic<bool>      m_running;
     std::atomic<uint64_t>  m_lastRxMs;

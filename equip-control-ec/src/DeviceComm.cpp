@@ -1,6 +1,7 @@
 #include "DeviceComm.h"
 #include <chrono>
 #include <cstring>
+#include <iostream>
 
 #ifndef _WIN32
 #  include <fcntl.h>
@@ -92,7 +93,10 @@ bool DeviceComm::isOpen() const {
 #endif
 }
 
-void DeviceComm::setFrameCallback(FrameCallback cb) { m_callback = std::move(cb); }
+void DeviceComm::setFrameCallback(FrameCallback cb) {
+    std::lock_guard<std::mutex> lk(m_callbackMutex);
+    m_callback = std::move(cb);
+}
 
 uint64_t DeviceComm::lastRxTimeMs() const { return m_lastRxMs.load(); }
 
@@ -182,14 +186,25 @@ bool DeviceComm::parserFeed(uint8_t byte, ParsedFrame& out) {
 // ── RX 스레드 ───────────────────────────────────────────────────
 void DeviceComm::rxLoop() {
     uint8_t byte;
+    uint32_t rxCount = 0;
     while (m_running) {
         if (readBytes(&byte, 1) == 1) {
+            rxCount++;
+            if (rxCount % 10 == 0)
+                std::cout << "[RX] " << rxCount << " bytes received\n";
             ParsedFrame frame;
             if (parserFeed(byte, frame)) {
+                std::cout << "[RX] frame OK type=0x" << std::hex
+                          << static_cast<int>(frame.type) << std::dec << "\n";
                 auto now = std::chrono::steady_clock::now().time_since_epoch();
                 m_lastRxMs = std::chrono::duration_cast<
                     std::chrono::milliseconds>(now).count();
-                if (m_callback) m_callback(frame);
+                FrameCallback cb;
+                {
+                    std::lock_guard<std::mutex> lk(m_callbackMutex);
+                    cb = m_callback;
+                }
+                if (cb) cb(frame);
             }
         }
     }
@@ -197,18 +212,24 @@ void DeviceComm::rxLoop() {
 
 // ── sendCommand ─────────────────────────────────────────────────
 bool DeviceComm::sendCommand(uint8_t type, const uint8_t* payload, uint16_t len) {
+    std::lock_guard<std::mutex> sendLk(m_sendMutex);  // 재진입 방지
+
     uint8_t  buf[PROTO_MAX_FRAME];
     uint16_t frameLen = buildFrame(type, m_txSeq, payload, len, buf);
 
     std::atomic<bool> acked{false};
     uint8_t expectedSeq = m_txSeq;
 
-    auto prev = m_callback;
-    setFrameCallback([&](const ParsedFrame& f) {
-        if (f.type == MSG_ACK && f.payload[0] == expectedSeq)
-            acked = true;
-        if (prev) prev(f);
-    });
+    FrameCallback prev;
+    {
+        std::lock_guard<std::mutex> lk(m_callbackMutex);
+        prev = m_callback;
+        m_callback = [&](const ParsedFrame& f) {
+            if (f.type == MSG_ACK && f.payload[0] == expectedSeq)
+                acked = true;
+            if (prev) prev(f);
+        };
+    }
 
     constexpr int MAX_RETRY  = 3;
     constexpr int TIMEOUT_MS = 1000;
@@ -224,7 +245,10 @@ bool DeviceComm::sendCommand(uint8_t type, const uint8_t* payload, uint16_t len)
         }
     }
 
-    setFrameCallback(prev);
+    {
+        std::lock_guard<std::mutex> lk(m_callbackMutex);
+        m_callback = prev;
+    }
     m_txSeq++;
     return ok;
 }

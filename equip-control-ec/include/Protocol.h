@@ -48,7 +48,7 @@ struct AckPayload {
 
 struct CmdFanPayload    { uint8_t on; };
 struct CmdBuzzerPayload { uint8_t on; };
-struct CmdLedPayload    { uint8_t r; uint8_t g; uint8_t b; };
+struct CmdLedPayload    { uint8_t state; };  // 1=ON, 0=OFF
 struct CmdStateSyncPayload { uint8_t state; };
 
 #pragma pack(pop)
