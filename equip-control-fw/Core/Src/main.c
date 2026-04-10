@@ -19,6 +19,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "cmsis_os.h"
+#include "adc.h"
 #include "iwdg.h"
 #include "usart.h"
 #include "gpio.h"
@@ -100,6 +101,7 @@ int main(void)
   MX_GPIO_Init();
   MX_USART2_UART_Init();
   MX_IWDG_Init();
+  MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
 #ifdef TEST_MODE
   test_periph_run();
