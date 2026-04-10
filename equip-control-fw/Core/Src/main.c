@@ -25,7 +25,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "test_periph.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -101,7 +101,10 @@ int main(void)
   MX_USART2_UART_Init();
   MX_IWDG_Init();
   /* USER CODE BEGIN 2 */
-
+#ifdef TEST_MODE
+  test_periph_run();
+  for (;;);   /* 테스트 완료 후 정지 — FreeRTOS 진입 안 함 */
+#endif
   /* USER CODE END 2 */
 
   /* Init scheduler */
