@@ -28,11 +28,11 @@
 #define BUZZER_PIN    GPIO_PIN_10   /* PB10  D6  */
 #define BUZZER_PORT   GPIOB
 
-#define SWITCH_PIN    GPIO_PIN_10   /* PA10  D2  */
-#define SWITCH_PORT   GPIOA
+#define SWITCH_PIN    GPIO_PIN_5    /* PB5   D4  */
+#define SWITCH_PORT   GPIOB
 
-#define FAN_PIN       GPIO_PIN_7    /* PC7   D9  */
-#define FAN_PORT      GPIOC
+#define FAN_PIN       GPIO_PIN_4    /* PB4   D5  */
+#define FAN_PORT      GPIOB
 
 /* ── INA219 I2C 주소 (A0=GND, A1=GND → 0x40, 8비트 = 0x80) ──── */
 #define INA219_ADDR   0x80U         /* 0x40 << 1 */
@@ -300,8 +300,8 @@ static void test_buzzer(void)
 
 static void test_switch(void)
 {
-    tprint("\r\n=== [2/5] SWITCH TEST  (PA10 / D2) ===\r\n");
-    tprint("스위치 한 핀 → PA10,  다른 핀 → GND\r\n");
+    tprint("\r\n=== [2/5] SWITCH TEST  (PB5 / D4) ===\r\n");
+    tprint("스위치 한 핀 → PB5,  다른 핀 → GND\r\n");
     tprint("10초간 버튼을 여러 번 눌러보세요...\r\n");
 
     GPIO_PinState last = HAL_GPIO_ReadPin(SWITCH_PORT, SWITCH_PIN);
@@ -404,8 +404,8 @@ static void test_ina219(void)
 
 static void test_fan(void)
 {
-    tprint("\r\n=== [5/5] FAN (IRF520) TEST  (PC7 / D9) ===\r\n");
-    tprint("PC7 → 1kΩ → IRF520 SIG\r\n");
+    tprint("\r\n=== [5/5] FAN (IRF520) TEST  (PB4 / D5) ===\r\n");
+    tprint("PB4 → 1kΩ → IRF520 SIG\r\n");
     tprint("팬+ → 5V,  팬- → IRF520 M+,  M- → GND\r\n");
 
     tprint("  >> FAN ON  (3초)\r\n");
@@ -430,7 +430,7 @@ static void test_fan(void)
 
 void test_periph_run(void)
 {
-    test_delay_ms(300U);   /* UART 안정화 */
+    test_delay_ms(3000U);  /* screen 접속 대기 */
 
     tprint("\r\n########################################\r\n");
     tprint("  PERIPH TEST MODE\r\n");
