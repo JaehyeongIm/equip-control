@@ -20,6 +20,8 @@
 #include "main.h"
 #include "usart.h"
 #include "iwdg.h"
+#include "i2c.h"
+#include "sht31.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
@@ -27,9 +29,6 @@
 /* ── 핀 정의 ──────────────────────────────────────────────────── */
 #define BUZZER_PIN    GPIO_PIN_10   /* PB10  D6  */
 #define BUZZER_PORT   GPIOB
-
-#define SWITCH_PIN    GPIO_PIN_5    /* PB5   D4  */
-#define SWITCH_PORT   GPIOB
 
 #define FAN_PIN       GPIO_PIN_4    /* PB4   D5  */
 #define FAN_PORT      GPIOB
@@ -42,11 +41,6 @@
 #define INA219_REG_BUS     0x02U
 #define INA219_REG_CURRENT 0x04U
 #define INA219_REG_CALIB   0x05U
-
-/* ── I2C1 타이밍 상수 (APB1 = 42 MHz, 100 kHz 표준 모드) ──────── */
-#define I2C1_FREQ       42U         /* FREQ 필드 값 */
-#define I2C1_CCR        210U        /* 42 000 000 / (2 × 100 000) */
-#define I2C1_TRISE      43U         /* 42 + 1 */
 
 /* ─────────────────────────────────────────────────────────────── */
 /*  공통 유틸                                                      */
@@ -89,14 +83,7 @@ static void gpio_periph_init(void)
     HAL_GPIO_Init(BUZZER_PORT, &g);
     HAL_GPIO_WritePin(BUZZER_PORT, BUZZER_PIN, GPIO_PIN_RESET);
 
-    /* 스위치 PA10 → Input Pull-Up */
-    g.Pin   = SWITCH_PIN;
-    g.Mode  = GPIO_MODE_INPUT;
-    g.Pull  = GPIO_PULLUP;
-    g.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(SWITCH_PORT, &g);
-
-    /* 팬(IRF520 SIG) PC7 → Output PP */
+    /* 팬(IRF520 SIG) PB4 → Output PP */
     g.Pin   = FAN_PIN;
     g.Mode  = GPIO_MODE_OUTPUT_PP;
     g.Pull  = GPIO_NOPULL;
@@ -139,140 +126,6 @@ static uint32_t adc1_read_raw(void)
     return ADC1->DR & 0xFFFU;
 }
 
-/* ─────────────────────────────────────────────────────────────── */
-/*  I2C1 (PB8=SCL D15, PB9=SDA D14) — 직접 레지스터 접근         */
-/* ─────────────────────────────────────────────────────────────── */
-
-static void i2c1_init_raw(void)
-{
-    /* I2C1 클럭 활성화 */
-    RCC->APB1ENR |= RCC_APB1ENR_I2C1EN;
-
-    /* PB8(SCL), PB9(SDA) → AF4, Open-Drain, Pull-Up, High-Speed */
-    /* MODER: AF(10) for PB8 bits[17:16], PB9 bits[19:18] */
-    GPIOB->MODER &= ~((3U << 16U) | (3U << 18U));
-    GPIOB->MODER |=  ((2U << 16U) | (2U << 18U));
-    /* OTYPER: open-drain */
-    GPIOB->OTYPER |= (1U << 8U) | (1U << 9U);
-    /* OSPEEDR: high speed */
-    GPIOB->OSPEEDR |= (3U << 16U) | (3U << 18U);
-    /* PUPDR: pull-up */
-    GPIOB->PUPDR &= ~((3U << 16U) | (3U << 18U));
-    GPIOB->PUPDR |=  ((1U << 16U) | (1U << 18U));
-    /* AFR[1]: AF4 for PB8(bits[3:0]), PB9(bits[7:4]) */
-    GPIOB->AFR[1] &= ~((0xFU << 0U) | (0xFU << 4U));
-    GPIOB->AFR[1] |=  ((4U   << 0U) | (4U   << 4U));
-
-    /* I2C1 리셋 후 설정 */
-    I2C1->CR1  = I2C_CR1_SWRST;
-    I2C1->CR1  = 0U;
-    I2C1->CR2  = I2C1_FREQ;
-    I2C1->CCR  = I2C1_CCR;
-    I2C1->TRISE = I2C1_TRISE;
-    I2C1->CR1 |= I2C_CR1_PE;
-}
-
-/* SR1 플래그 대기 헬퍼 (timeout_ms 초과 시 0 반환) */
-static uint8_t i2c1_wait_sr1(uint32_t flag, uint32_t timeout_ms)
-{
-    uint32_t end = HAL_GetTick() + timeout_ms;
-    while (!(I2C1->SR1 & flag)) {
-        if (HAL_GetTick() >= end) return 0U;
-    }
-    return 1U;
-}
-
-/* 장치 존재 확인 (ACK 수신 시 1 반환) */
-static uint8_t i2c1_scan(uint8_t dev_addr)
-{
-    /* START */
-    I2C1->CR1 |= I2C_CR1_START;
-    if (!i2c1_wait_sr1(I2C_SR1_SB, 10U)) { I2C1->CR1 |= I2C_CR1_STOP; return 0U; }
-
-    /* 주소 전송 (Write 방향) */
-    I2C1->DR = dev_addr & 0xFEU;
-    uint32_t end = HAL_GetTick() + 10U;
-    while (HAL_GetTick() < end) {
-        uint16_t sr1 = (uint16_t)I2C1->SR1;
-        if (sr1 & I2C_SR1_ADDR) { (void)I2C1->SR2; I2C1->CR1 |= I2C_CR1_STOP; return 1U; }
-        if (sr1 & I2C_SR1_AF)   { I2C1->SR1 &= ~I2C_SR1_AF;  I2C1->CR1 |= I2C_CR1_STOP; return 0U; }
-    }
-    I2C1->CR1 |= I2C_CR1_STOP;
-    return 0U;
-}
-
-/* 레지스터 2바이트 쓰기 */
-static uint8_t i2c1_write_reg16(uint8_t dev_addr, uint8_t reg, uint16_t val)
-{
-    /* START */
-    I2C1->CR1 |= I2C_CR1_START;
-    if (!i2c1_wait_sr1(I2C_SR1_SB, 10U)) goto fail;
-
-    /* 주소 (Write) */
-    I2C1->DR = dev_addr & 0xFEU;
-    if (!i2c1_wait_sr1(I2C_SR1_ADDR, 10U)) goto fail;
-    (void)I2C1->SR2;
-
-    /* 레지스터 주소 */
-    I2C1->DR = reg;
-    if (!i2c1_wait_sr1(I2C_SR1_TXE, 10U)) goto fail;
-
-    /* MSB */
-    I2C1->DR = (uint8_t)(val >> 8U);
-    if (!i2c1_wait_sr1(I2C_SR1_TXE, 10U)) goto fail;
-
-    /* LSB */
-    I2C1->DR = (uint8_t)(val & 0xFFU);
-    if (!i2c1_wait_sr1(I2C_SR1_BTF, 10U)) goto fail;
-
-    I2C1->CR1 |= I2C_CR1_STOP;
-    return 1U;
-fail:
-    I2C1->CR1 |= I2C_CR1_STOP;
-    return 0U;
-}
-
-/* 레지스터 2바이트 읽기 */
-static uint8_t i2c1_read_reg16(uint8_t dev_addr, uint8_t reg, uint16_t *out)
-{
-    /* 레지스터 주소 쓰기 */
-    I2C1->CR1 |= I2C_CR1_START;
-    if (!i2c1_wait_sr1(I2C_SR1_SB, 10U)) goto fail;
-
-    I2C1->DR = dev_addr & 0xFEU;
-    if (!i2c1_wait_sr1(I2C_SR1_ADDR, 10U)) goto fail;
-    (void)I2C1->SR2;
-
-    I2C1->DR = reg;
-    if (!i2c1_wait_sr1(I2C_SR1_TXE, 10U)) goto fail;
-
-    /* Repeated START → 읽기 방향 */
-    I2C1->CR1 |= I2C_CR1_START;
-    if (!i2c1_wait_sr1(I2C_SR1_SB, 10U)) goto fail;
-
-    I2C1->DR = dev_addr | 0x01U;
-
-    /* 2바이트 읽기: 마지막 바이트 전 NACK+STOP 준비 */
-    I2C1->CR1 |= I2C_CR1_ACK;
-    if (!i2c1_wait_sr1(I2C_SR1_ADDR, 10U)) goto fail;
-    (void)I2C1->SR2;
-
-    /* MSB */
-    if (!i2c1_wait_sr1(I2C_SR1_RXNE, 10U)) goto fail;
-    uint8_t msb = (uint8_t)I2C1->DR;
-
-    /* LSB: NACK + STOP 설정 후 수신 */
-    I2C1->CR1 &= ~I2C_CR1_ACK;
-    I2C1->CR1 |=  I2C_CR1_STOP;
-    if (!i2c1_wait_sr1(I2C_SR1_RXNE, 10U)) goto fail;
-    uint8_t lsb = (uint8_t)I2C1->DR;
-
-    *out = (uint16_t)((msb << 8U) | lsb);
-    return 1U;
-fail:
-    I2C1->CR1 |= I2C_CR1_STOP;
-    return 0U;
-}
 
 /* ─────────────────────────────────────────────────────────────── */
 /*  Test 1: 부저 (PB10 / D6)                                      */
@@ -295,50 +148,68 @@ static void test_buzzer(void)
 }
 
 /* ─────────────────────────────────────────────────────────────── */
-/*  Test 2: 택트 스위치 (PA10 / D2)                               */
-/* ─────────────────────────────────────────────────────────────── */
-
-static void test_switch(void)
-{
-    tprint("\r\n=== [2/5] SWITCH TEST  (PB5 / D4) ===\r\n");
-    tprint("스위치 한 핀 → PB5,  다른 핀 → GND\r\n");
-    tprint("10초간 버튼을 여러 번 눌러보세요...\r\n");
-
-    GPIO_PinState last = HAL_GPIO_ReadPin(SWITCH_PORT, SWITCH_PIN);
-    tprint("  초기 상태: %s\r\n",
-           last == GPIO_PIN_SET ? "HIGH (해제)" : "LOW  (눌림)");
-
-    uint32_t end = HAL_GetTick() + 10000U;
-    while (HAL_GetTick() < end) {
-        HAL_IWDG_Refresh(&hiwdg);
-        GPIO_PinState cur = HAL_GPIO_ReadPin(SWITCH_PORT, SWITCH_PIN);
-        if (cur != last) {
-            tprint("  >> %s\r\n",
-                   cur == GPIO_PIN_RESET ? "LOW  (눌림)" : "HIGH (해제)");
-            last = cur;
-        }
-        HAL_Delay(10U);
-    }
-    tprint(">>> 눌림/해제가 출력됐으면 OK\r\n");
-}
-
-/* ─────────────────────────────────────────────────────────────── */
-/*  Test 3: 포텐셔미터 ADC (PA0 / A0)                             */
+/*  Test 2: 포텐셔미터 ADC (PA0 / A0)                             */
 /* ─────────────────────────────────────────────────────────────── */
 
 static void test_potentiometer(void)
 {
-    tprint("\r\n=== [3/5] POTENTIOMETER ADC TEST  (PA0 / A0) ===\r\n");
+    tprint("\r\n=== [2/5] POTENTIOMETER ADC TEST  (PA0 / A0) ===\r\n");
     tprint("포텐 SIG → PA0,  VCC → 3.3V,  GND → GND\r\n");
     tprint("포텐을 천천히 돌려보세요 — 8회 측정\r\n");
 
     for (int i = 1; i <= 8; i++) {
         uint32_t raw = adc1_read_raw();
-        float    vol = (float)raw * 3.3f / 4095.0f;
-        tprint("  [%d] raw=%4lu  %.2f V\r\n", i, (unsigned long)raw, vol);
+        uint32_t vol_i = raw * 330U / 4095U;   /* 0~330 (×0.01V) */
+        tprint("  [%d] raw=%4lu  %lu.%02lu V\r\n", i,
+               (unsigned long)raw, (unsigned long)(vol_i / 100U),
+               (unsigned long)(vol_i % 100U));
         test_delay_ms(700U);
     }
     tprint(">>> 포텐 돌릴 때 0~4095 사이로 변하면 OK\r\n");
+}
+
+/* ─────────────────────────────────────────────────────────────── */
+/*  Test 3: SHT31 온습도 센서 (I2C1 — PB9 SDA / PB8 SCL)         */
+/* ─────────────────────────────────────────────────────────────── */
+
+static void test_sht31(void)
+{
+    tprint("\r\n=== [3/5] SHT31 TEMP/HUMI TEST  (PB9 SDA D14 / PB8 SCL D15) ===\r\n");
+    tprint("SHT31 SDA → D14, SCL → D15, VDD → 3.3V, ADDR → GND\r\n");
+    tprint("4.7kΩ 풀업×2 → 3.3V 연결 필요\r\n");
+
+    /* 0x44 / 0x45 둘 다 스캔 */
+    uint8_t sht31_addr = 0U;
+    if (HAL_I2C_IsDeviceReady(&hi2c1, (0x44U << 1), 1, 10) == HAL_OK) {
+        sht31_addr = 0x44U;
+        tprint("  I2C 스캔  OK  (addr=0x44)\r\n");
+    } else if (HAL_I2C_IsDeviceReady(&hi2c1, (0x45U << 1), 1, 10) == HAL_OK) {
+        sht31_addr = 0x45U;
+        tprint("  I2C 스캔  OK  (addr=0x45) — ADDR핀이 3.3V에 연결됨\r\n");
+    } else {
+        tprint(">>> FAIL: I2C 응답 없음 (0x44, 0x45 모두 시도)\r\n");
+        tprint("    VDD/납땜/풀업 재확인\r\n");
+        return;
+    }
+    (void)sht31_addr;
+
+    /* 5회 측정 (1초 간격) */
+    tprint("  측정 5회 (1초 간격)\r\n");
+    for (int i = 1; i <= 5; i++) {
+        SHT31_Data d;
+        if (SHT31_Read(&d) == SHT31_OK) {
+            int t_i = (int)d.temperature;
+            int t_d = (int)(d.temperature * 10.0f) % 10;
+            int h_i = (int)d.humidity;
+            int h_d = (int)(d.humidity * 10.0f) % 10;
+            tprint("  [%d] Temp=%d.%d C  Humi=%d.%d %%\r\n",
+                   i, t_i, t_d, h_i, h_d);
+        } else {
+            tprint("  [%d] READ ERROR\r\n", i);
+        }
+        test_delay_ms(1000U);
+    }
+    tprint(">>> 온도/습도 값이 출력되면 OK\r\n");
 }
 
 /* ─────────────────────────────────────────────────────────────── */
@@ -352,7 +223,7 @@ static void test_ina219(void)
     tprint("INA219 IN+/IN- 는 측정할 전류 경로에 직렬 삽입\r\n");
 
     /* 장치 응답 확인 */
-    if (!i2c1_scan(INA219_ADDR)) {
+    if (HAL_I2C_IsDeviceReady(&hi2c1, INA219_ADDR, 1, 10) != HAL_OK) {
         tprint(">>> FAIL: I2C 응답 없음 (addr=0x40)\r\n");
         tprint("    배선/풀업/VCC 재확인\r\n");
         return;
@@ -360,8 +231,11 @@ static void test_ina219(void)
     tprint("  I2C 스캔  OK  (addr=0x40)\r\n");
 
     /* Config 레지스터 기본값 확인 (0x399F) */
+    uint8_t  rbuf[2];
     uint16_t cfg = 0U;
-    i2c1_read_reg16(INA219_ADDR, INA219_REG_CONFIG, &cfg);
+    HAL_I2C_Mem_Read(&hi2c1, INA219_ADDR, INA219_REG_CONFIG,
+                     I2C_MEMADD_SIZE_8BIT, rbuf, 2, 10);
+    cfg = ((uint16_t)rbuf[0] << 8) | rbuf[1];
     tprint("  Config = 0x%04X  %s\r\n", cfg,
            cfg == 0x399FU ? "(기본값 OK)" : "(기본값 아님 — 주의)");
 
@@ -371,35 +245,50 @@ static void test_ina219(void)
      *   Current_LSB = 100 µA
      *   Cal = 0.04096 / (100e-6 × 0.1) = 4096 = 0x1000
      */
-    i2c1_write_reg16(INA219_ADDR, INA219_REG_CALIB, 0x1000U);
+    uint8_t wbuf[2] = {0x10U, 0x00U};
+    HAL_I2C_Mem_Write(&hi2c1, INA219_ADDR, INA219_REG_CALIB,
+                      I2C_MEMADD_SIZE_8BIT, wbuf, 2, 10);
 
     /* 3회 측정 출력 */
     tprint("  측정 3회 (1초 간격)\r\n");
     for (int i = 1; i <= 3; i++) {
+        uint8_t  tmp[2];
         uint16_t bus_raw  = 0U;
         uint16_t shnt_raw = 0U;
         uint16_t curr_raw = 0U;
 
-        i2c1_read_reg16(INA219_ADDR, INA219_REG_BUS,     &bus_raw);
-        i2c1_read_reg16(INA219_ADDR, INA219_REG_SHUNT,   &shnt_raw);
-        i2c1_read_reg16(INA219_ADDR, INA219_REG_CURRENT, &curr_raw);
+        HAL_I2C_Mem_Read(&hi2c1, INA219_ADDR, INA219_REG_BUS,
+                         I2C_MEMADD_SIZE_8BIT, tmp, 2, 10);
+        bus_raw = ((uint16_t)tmp[0] << 8) | tmp[1];
+
+        HAL_I2C_Mem_Read(&hi2c1, INA219_ADDR, INA219_REG_SHUNT,
+                         I2C_MEMADD_SIZE_8BIT, tmp, 2, 10);
+        shnt_raw = ((uint16_t)tmp[0] << 8) | tmp[1];
+
+        HAL_I2C_Mem_Read(&hi2c1, INA219_ADDR, INA219_REG_CURRENT,
+                         I2C_MEMADD_SIZE_8BIT, tmp, 2, 10);
+        curr_raw = ((uint16_t)tmp[0] << 8) | tmp[1];
 
         /* bus voltage: bits[15:3] × 4 mV */
-        float vbus   = (float)(bus_raw >> 3U) * 0.004f;
-        /* shunt voltage: signed × 10 µV → mV */
-        float vshunt = (float)(int16_t)shnt_raw * 0.01f;
-        /* current: signed × 100 µA → mA */
-        float curr   = (float)(int16_t)curr_raw * 0.1f;
+        uint32_t vbus_mv  = (bus_raw >> 3U) * 4U;
+        /* shunt voltage: signed × 10 µV → 0.01 mV 단위 */
+        int32_t  vsh_uv   = (int32_t)(int16_t)shnt_raw * 10;
+        /* current: signed × 100 µA */
+        int32_t  curr_ua  = (int32_t)(int16_t)curr_raw * 100;
 
-        tprint("  [%d] Vbus=%.2fV  Vshunt=%.3fmV  I=%.1fmA\r\n",
-               i, vbus, vshunt, curr);
+        tprint("  [%d] Vbus=%lu.%03lu V  Vshunt=%ld uV  I=%ld uA\r\n",
+               i,
+               (unsigned long)(vbus_mv / 1000U),
+               (unsigned long)(vbus_mv % 1000U),
+               (long)vsh_uv,
+               (long)curr_ua);
         test_delay_ms(1000U);
     }
     tprint(">>> 전압값이 출력되면 OK\r\n");
 }
 
 /* ─────────────────────────────────────────────────────────────── */
-/*  Test 5: IRF520 + 쿨링 팬 (PC7 / D9)                           */
+/*  Test 5: IRF520 + 쿨링 팬 (PB4 / D5)                           */
 /* ─────────────────────────────────────────────────────────────── */
 
 static void test_fan(void)
@@ -439,11 +328,11 @@ void test_periph_run(void)
 
     gpio_periph_init();
     adc1_init_raw();
-    i2c1_init_raw();
+    /* I2C1: MX_I2C1_Init()이 main.c에서 이미 초기화함 */
 
     test_buzzer();
-    test_switch();
     test_potentiometer();
+    test_sht31();
     test_ina219();
     test_fan();
 

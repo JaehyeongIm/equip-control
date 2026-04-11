@@ -19,7 +19,7 @@ static uint64_t nowMs() {
 }
 
 int main(int argc, char* argv[]) {
-    std::string port = (argc > 1) ? argv[1] : "/dev/tty.usbmodem14103";
+    std::string port = (argc > 1) ? argv[1] : "/dev/tty.usbmodem21303";
 
     StateMachine  sm;
     AlarmManager  alarmMgr(sm);

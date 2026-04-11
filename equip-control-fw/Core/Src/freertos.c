@@ -21,6 +21,8 @@
 #include "watchdog_mgr.h"
 #include "gpio.h"
 #include "stm32f4xx.h"
+#include "i2c.h"
+#include "sht31.h"
 #include <string.h>
 
 static void dbg(const char *s) {
@@ -361,14 +363,24 @@ void StartTaskSensor(void *argument)
 
     watchdog_checkin(TASK_ID_SENSOR);
 
-    /* 더미 센서 데이터 — 실제 센서 연결 후 드라이버 호출로 교체 */
-    data.flags        = 0x03U;
-    data.sht31_error  = SENSOR_ERR_NONE;
+    /* SHT31 온습도 측정 */
+    SHT31_Data sht;
+    if (SHT31_Read(&sht) == SHT31_OK) {
+      data.flags       = 0x01U;        /* sht31_valid */
+      data.sht31_error = SENSOR_ERR_NONE;
+      data.temperature = sht.temperature;
+      data.humidity    = sht.humidity;
+    } else {
+      data.flags       = 0x00U;
+      data.sht31_error = SENSOR_ERR_I2C_NACK;
+      data.temperature = 0.0f;
+      data.humidity    = 0.0f;
+    }
+
+    /* INA219 미구현 — 더미 유지 */
     data.ina219_error = SENSOR_ERR_NONE;
-    data.temperature  = 25.0f;
-    data.humidity     = 50.0f;
-    data.current_mA   = 100.0f;
-    data.voltage_V    = 3.3f;
+    data.current_mA   = 0.0f;
+    data.voltage_V    = 0.0f;
     data.timestamp_ms = osKernelGetTickCount();
 
     /* 공유 버퍼 갱신 */
