@@ -7,10 +7,10 @@
 | 택트 스위치 | PB5 | D4 | CN9-5 | Input | GPIO_Input Pull-Up / EXTI Falling | 한쪽 → PB5, 반대쪽 → GND |
 | 액티브 부저 | PB10 | D6 | CN9-7 | Output | GPIO_Output | S → PB10, VCC → 3.3V |
 | 포텐셔미터 | PA0 | A0 | CN8-1 | Analog In | ADC1_IN0 | SIG → PA0, VCC → 3.3V |
-| INA219 SCL | PB8 | D15 | CN5-10 | I2C | I2C1_SCL | 4.7kΩ 풀업 → 3.3V |
 | INA219 SDA | PB9 | D14 | CN5-9 | I2C | I2C1_SDA | 4.7kΩ 풀업 → 3.3V |
-| SHT31 SCL | PB8 | D15 | CN5-10 | I2C | I2C1_SCL (INA219와 버스 공유) | I2C 주소 0x44 (ADDR=GND) |
-| SHT31 SDA | PB9 | D14 | CN5-9 | I2C | I2C1_SDA (INA219와 버스 공유) | |
+| INA219 SCL | PB8 | D15 | CN5-10 | I2C | I2C1_SCL | 4.7kΩ 풀업 → 3.3V |
+| SHT31 SDA | PB9 | D14 | CN5-9 | I2C | I2C1_SDA (INA219와 버스 공유) | I2C 주소 0x44 (ADDR=GND) |
+| SHT31 SCL | PB8 | D15 | CN5-10 | I2C | I2C1_SCL (INA219와 버스 공유) | |
 | IRF520 SIG (팬) | PB4 | D5 | CN9-6 | Output | GPIO_Output → TIM3_CH1 PWM | 1kΩ 직렬 → SIG, 팬 전원 5V |
 
 ### 저항 정리

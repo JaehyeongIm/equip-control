@@ -1,14 +1,19 @@
-# SECS/GEM 기반 장비 상태 모니터링 시스템
-
-STM32 NUCLEO-F411RE 보드를 사용한 3-tier 구조의 장비 상태 모니터링 포트폴리오 프로젝트입니다.
+# 가상 공정 챔버 기반 장비 이상 진단·인터락·PM 시뮬레이터
+  
+Lock&Lock 밀폐 용기를 가상 공정 챔버로 삼아 히터 제어·과온 인터락·PM 스케줄링을 구현하고  
+SECS/GEM(HSMS + SECS-II) 프로토콜로 Host에 실시간 보고합니다.
 
 ```
-STM32 FW (C)          EC (Windows, C++)        Host (macOS, Python)
-────────────          ─────────────────        ────────────────────
-FreeRTOS 6태스크  →   DeviceComm (UART)   →    HsmsClient (TCP)
-센서/버튼/HB          StateMachine             Console CLI
-UART 내부 프로토콜     AlarmManager
-                      HsmsServer (HSMS/TCP)
+STM32 FW (C)              EC (macOS, C++)              Host (macOS, Python)
+────────────              ───────────────              ────────────────────
+FreeRTOS 6태스크      →   DeviceComm (UART)      →     HsmsClient (TCP)
+SHT31 온습도              StateMachine                  curses GUI
+INA219 전류/전압           FaultDiagnosis                챔버 상태 표시
+릴레이/팬/부저 제어         InterlockChecker              알람/PM 모니터링
+도어 리미트 스위치          AlarmManager (ALID 1~7)       S2F41 명령 입력
+UART 바이너리 프레임        PMTracker
+                          HsmsServer (HSMS/TCP)
+                          ※ EC · Host 동일 MacBook, localhost:5000
 ```
 
 ---
@@ -20,13 +25,41 @@ equip-control/
 ├── equip-control-fw/       # STM32 펌웨어 (STM32CubeIDE)
 ├── equip-control-ec/       # EC 소프트웨어 (C++, CMake)
 ├── equip-control-host/     # Host 프로그램 (Python)
-├── SRS.md                  # 소프트웨어 요구사항 명세 (IEEE 29148-2018)
-└── SDD.md                  # 소프트웨어 설계 문서 (IEEE 1016-2009)
+├── SRS.md                  # 소프트웨어 요구사항 명세 (IEEE 29148-2018, v2.0)
+├── SDD.md                  # 소프트웨어 설계 문서 (IEEE 1016-2009, v2.0)
+└── ARCHITECTURE.md         # 3계층 아키텍처 다이어그램
 ```
 
 ---
 
-## 1단계 — 펌웨어 빌드 및 플래시 (STM32CubeIDE, Windows)
+## 하드웨어 구성
+
+| 부품 | 역할 |
+|------|------|
+| STM32 NUCLEO-F411RE | 메인 MCU |
+| SHT31 | 챔버 내부 온습도 측정 (I2C, 0x45) |
+| INA219 | 히터 전류/전압 측정 (I2C, 0x40) |
+| 카프톤 히터 12V/10W | 챔버 가열 (릴레이 ON/OFF 제어) |
+| 5V 릴레이 모듈 | 히터 전원 스위칭 |
+| SW-102T (72°C) | 하드웨어 과온 인터락 (히터 직렬 회로) |
+| DC 잭 12V | 히터 전원 입력 |
+| 5V 팬 | 챔버 냉각 (MOSFET 제어) |
+| 리미트 스위치 | 챔버 도어 감지 (PA1) |
+| 부저 | 알람 경보 (PB10) |
+| 포텐셔미터 | 아날로그 입력 테스트 (PA0) |
+
+### 이중 과온 인터락
+
+```
+65°C 초과 → EC 소프트웨어 ALARM 전이 → 릴레이 OFF 명령
+68°C 초과 → EC 소프트웨어 INTERLOCK 전이 → 릴레이 OFF 명령
+72°C 도달 → SW-102T 하드웨어 차단 → INA219 전류 소실 감지 → EC INTERLOCK 전이
+도어 열림 → EC 소프트웨어 INTERLOCK 전이 → 릴레이 OFF 명령
+```
+
+---
+
+## 1단계 — 펌웨어 빌드 및 플래시 (STM32CubeIDE)
 
 ### 사전 준비
 - STM32CubeIDE 설치
@@ -47,29 +80,28 @@ equip-control/
 |-----|------|
 | LD3 (빨간) | 항상 점등 — 3.3V 전원 |
 | LD1 (빨간) | USB 연결 중 점등 — ST-LINK |
-| LD2 (초록) | EC에서 CMD_FAN 명령 수신 시 ON/OFF |
+| LD2 (초록) | 챔버 상태 표시 (IDLE: OFF, RUNNING: ON, ALARM: 점멸) |
 
 ---
 
-## 2단계 — EC 빌드 및 실행 (Windows)
+## 2단계 — EC 빌드 및 실행 (macOS, 터미널 1)
 
 ### 사전 준비
-- CMake 설치
-- MinGW 또는 MSVC 컴파일러
+- CMake 설치 (`brew install cmake`)
+- Xcode Command Line Tools (`xcode-select --install`)
 
 ### 빌드
 
 ```bash
 cd equip-control-ec
-cmake -B build -S .
-cmake --build build
+cmake -B build && cmake --build build
 ```
 
 ### 실행
 
 ```bash
-# UART 포트 지정 (Windows: COM3 등, macOS: /dev/tty.usbmodem*)
-./build/ec COM3
+# 장치명 확인: ls /dev/tty.usbmodem*
+./build/ec /dev/tty.usbmodem21303
 ```
 
 ### EC 실행 시 동작
@@ -77,15 +109,16 @@ cmake --build build
 - TCP 포트 5000에서 Host 연결 대기
 - 콘솔에 수신 로그 출력:
   ```
-  [EC] UART connected: COM3
+  [EC] UART connected: /dev/tty.usbmodem21303
   [HSMS] Listening on port 5000
-  [SENSOR] temp=25.0C humi=50.0% curr=100.0mA volt=3.3V
+  [STATE] IDLE
+  [SENSOR] temp=25.3C humi=42.1% curr=0mA volt=12.0V
   [HB] seq=0
   ```
 
 ---
 
-## 3단계 — Host 실행 (macOS)
+## 3단계 — Host 실행 (macOS, 터미널 2)
 
 ### 사전 준비
 
@@ -98,9 +131,6 @@ python3 --version
 
 ```bash
 cd equip-control-host
-
-# EC IP/포트 확인 (기본값: 127.0.0.1:5000)
-# EC가 다른 PC에 있다면 config.py에서 EC_HOST 수정
 python3 main.py
 ```
 
@@ -108,17 +138,17 @@ python3 main.py
 
 ```
 ==================================================
-       EQUIP-CONTROL HOST
+   가상 공정 챔버 장비 제어 시스템
 ==================================================
-[State]  Equipment: IDLE     | Online: YES
-[Sensor] Temp: 25.0C  Humi: 50.0%  Curr: 100.0mA  Volt: 3.30V
-[Alarm]  Active: 0  (알람 없음)
+[State]   Chamber: IDLE      | Online: YES
+[Sensor]  Temp: 25.3C  Humi: 42.1%  Curr: 0mA  Volt: 12.0V
+[PM]      가동시간: 0.0h  사이클: 0  (PM 불필요)
+[Alarm]   Active: 0  (알람 없음)
 --------------------------------------------------
 [Events] (최근 10건)
-  10:01:23 | CEID-8
-  10:01:18 | CEID-1
+  10:01:23 | CEID-8 (SENSOR_DATA)
 --------------------------------------------------
-Commands: START | STOP | RESET | ACK_ALARM <alid> | QUIT
+Commands: START | STOP | RESET | ACK_ALARM <alid> | PM_RESET | QUIT
 >
 ```
 
@@ -126,10 +156,11 @@ Commands: START | STOP | RESET | ACK_ALARM <alid> | QUIT
 
 | 명령 | 설명 |
 |------|------|
-| `START` | 장비 IDLE → RUNNING 전환 |
-| `STOP` | 장비 RUNNING → IDLE 전환 |
-| `RESET` | 장비 ALARM/ERROR → IDLE 전환 |
-| `ACK_ALARM <alid>` | 알람 해제 (alid: 1~4) |
+| `START` | 챔버 가열 시작 (IDLE → HEATING) |
+| `STOP` | 챔버 가열 중지 (RUNNING → COOLING) |
+| `RESET` | 알람/인터락 해제 시도 (→ IDLE) |
+| `ACK_ALARM <alid>` | 알람 확인 (alid: 1~7) |
+| `PM_RESET` | PM 카운터 초기화 |
 | `QUIT` | 프로그램 종료 |
 
 ---
@@ -137,11 +168,14 @@ Commands: START | STOP | RESET | ACK_ALARM <alid> | QUIT
 ## 전체 실행 순서
 
 ```
-1. STM32 보드를 EC PC(Windows)에 USB 연결
-2. EC 실행: ./ec COM3
-3. Host 실행: python3 main.py
-4. Host 화면에서 Online: YES 확인
-5. 명령 입력: START → STOP → RESET
+1. 하드웨어 연결 확인 (SHT31, INA219, 릴레이, 팬, 리미트 스위치)
+2. STM32 보드를 MacBook에 USB 연결
+3. 터미널 1 — EC 실행:
+     cd equip-control-ec && ./build/ec /dev/tty.usbmodem21303
+4. 터미널 2 — Host 실행:
+     cd equip-control-host && python3 main.py
+5. Host 화면에서 Online: YES 확인
+6. 명령 입력: START → (온도 상승 관찰) → STOP → RESET
 ```
 
 ---
@@ -150,10 +184,36 @@ Commands: START | STOP | RESET | ACK_ALARM <alid> | QUIT
 
 | ALID | 알람명 | 발생 조건 |
 |------|--------|-----------|
-| 1 | TEMP_HIGH | 온도 > 80°C |
-| 2 | HUMIDITY_HIGH | 습도 > 95% |
-| 3 | SENSOR_ERROR | SHT31 또는 INA219 오류 |
-| 4 | UART_COMM_ERROR | Heartbeat 10초 이상 미수신 |
+| 1 | TEMP_HIGH | 챔버 온도 > 65°C |
+| 2 | TEMP_CRITICAL | 챔버 온도 > 68°C (인터락) |
+| 3 | DOOR_OPEN | 도어 열림 감지 (인터락) |
+| 4 | CURRENT_LOSS | 히터 전류 소실 (SW-102T 동작) |
+| 5 | SENSOR_ERROR | SHT31 또는 INA219 오류 |
+| 6 | COMM_ERROR | Heartbeat 10초 이상 미수신 |
+| 7 | PM_DUE | PM 주기 도래 |
+
+---
+
+## 챔버 상태 머신
+
+```
+IDLE ──START──► HEATING ──온도 안정──► RUNNING
+  ▲                │                     │
+  │              과온/도어              STOP
+RESET             │                     │
+  │               ▼                     ▼
+  └──── ALARM ◄──65°C        COOLING ──냉각 완료──► IDLE
+         │
+       68°C / 도어열림
+         │
+         ▼
+      INTERLOCK ──RESET──► IDLE
+         │
+       PM 도래
+         │
+         ▼
+    PM_REQUIRED ──PM_RESET──► IDLE
+```
 
 ---
 
@@ -166,7 +226,21 @@ Commands: START | STOP | RESET | ACK_ALARM <alid> | QUIT
 - SOF: 0xAA
 - CRC: CRC16-CCITT (poly=0x1021, init=0xFFFF)
 
+| TYPE | 방향 | 내용 |
+|------|------|------|
+| 0x01 | STM32→EC | MSG_SENSOR_DATA (온도/습도/전류/전압/도어) |
+| 0x02 | STM32→EC | MSG_HEARTBEAT |
+| 0x03 | STM32→EC | MSG_BUTTON_EVENT |
+| 0x04 | STM32→EC | MSG_DOOR_EVENT |
+| 0x10 | EC→STM32 | MSG_CMD_RELAY (히터 릴레이 ON/OFF) |
+| 0x11 | EC→STM32 | MSG_CMD_FAN (팬 ON/OFF) |
+| 0x12 | EC→STM32 | MSG_CMD_BUZZER (부저 ON/OFF) |
+| 0x13 | EC→STM32 | MSG_CMD_LED (LED 패턴) |
+
+---
+
 ## 관련 문서
 
-- [SRS.md](SRS.md) — 소프트웨어 요구사항 명세 (IEEE 29148-2018, v1.3)
-- [SDD.md](SDD.md) — 소프트웨어 설계 문서 (IEEE 1016-2009, v1.0)
+- [SRS.md](SRS.md) — 소프트웨어 요구사항 명세 (IEEE 29148-2018, v2.0)
+- [SDD.md](SDD.md) — 소프트웨어 설계 문서 (IEEE 1016-2009, v2.0)
+- [ARCHITECTURE.md](ARCHITECTURE.md) — 3계층 아키텍처 다이어그램
