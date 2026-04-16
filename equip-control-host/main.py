@@ -42,15 +42,20 @@ def main():
             client.send(msg)
             state.events.append(f"→ S2F41 {cmd}")
 
-        elif cmd == "ACK_ALARM" and len(parts) > 1:
+        elif cmd == "CHECK" and len(parts) > 1:
+            # 현재 주요 알람의 점검 항목 완료 토글
             try:
-                alid = int(parts[1])
-                state.active_alarms.discard(alid)
-                state.events.append(f"→ ACK_ALARM alid={alid}")
+                idx = int(parts[1]) - 1  # 1-based → 0-based
+                primary = state.primary_alid()
+                if primary:
+                    state.check_item(primary, idx)
+                    state.events.append(f"→ CHECK {idx + 1} (ALID={primary})")
+                else:
+                    state.events.append("→ CHECK: 활성 알람 없음")
             except ValueError:
-                print("[Host] alid는 숫자여야 합니다.")
+                state.events.append("[Host] CHECK 번호는 숫자여야 합니다.")
         else:
-            print(f"[Host] 알 수 없는 명령: {line}")
+            state.events.append(f"→ 알 수 없는 명령: {line}")
 
     # ── CLI 시작 ───────────────────────────────────────────────
     console = Console(state, on_command)
