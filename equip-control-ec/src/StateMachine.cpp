@@ -15,37 +15,41 @@ void StateMachine::transition(EquipState next) {
     if (m_callback) m_callback(prev, next);
 }
 
-// SDD 4.2 상태 전이 테이블 구현
+// AIM-001 §4 상태 전이 테이블 구현
 void StateMachine::processEvent(EquipEvent e) {
     switch (e) {
     case EquipEvent::CMD_START:
         if (m_state == EquipState::IDLE)
-            transition(EquipState::RUNNING);
+            transition(EquipState::HEATING);
         break;
 
     case EquipEvent::CMD_STOP:
-        if (m_state == EquipState::RUNNING)
+        if (m_state == EquipState::HEATING)
             transition(EquipState::IDLE);
         break;
 
     case EquipEvent::CMD_RESET:
-        if (m_state == EquipState::ALARM || m_state == EquipState::ERROR_STATE)
+        // 복구 조건은 외부(HsmsServer)에서 확인 후 이벤트 전달
+        if (m_state == EquipState::ALARM || m_state == EquipState::INTERLOCK)
             transition(EquipState::IDLE);
         break;
 
     case EquipEvent::EVENT_ALARM:
-        // 어느 상태에서든 ALARM으로 전이
-        transition(EquipState::ALARM);
+        // SW-AL: HEATING → ALARM (이미 INTERLOCK이면 무시)
+        if (m_state == EquipState::HEATING)
+            transition(EquipState::ALARM);
         break;
 
-    case EquipEvent::EVENT_ERROR:
-        // 어느 상태에서든 ERROR로 전이
-        transition(EquipState::ERROR_STATE);
+    case EquipEvent::EVENT_INTERLOCK:
+        // SW-IL: HEATING 또는 ALARM → INTERLOCK
+        if (m_state == EquipState::HEATING || m_state == EquipState::ALARM)
+            transition(EquipState::INTERLOCK);
         break;
 
     case EquipEvent::ALARM_CLEAR:
+        // SW-AL 알람이 모두 해소된 경우 HEATING으로 복귀 (COMM_ERROR 자동 복구)
         if (m_state == EquipState::ALARM)
-            transition(EquipState::IDLE);
+            transition(EquipState::HEATING);
         break;
     }
 }

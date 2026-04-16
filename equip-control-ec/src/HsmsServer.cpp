@@ -274,12 +274,15 @@ void HsmsServer::handleS2F41(uint32_t sysBytes, const uint8_t* body, uint16_t le
     } else if (rcmd == "STOP") {
         m_sm.processEvent(EquipEvent::CMD_STOP);
     } else if (rcmd == "RESET") {
-        if (m_sm.currentState() == EquipState::ERROR_STATE) hcack = 0x04;
-        else m_sm.processEvent(EquipEvent::CMD_RESET);
+        // ALARM / INTERLOCK → IDLE 전이 (복구 조건 충족 가정)
+        if (m_sm.currentState() != EquipState::ALARM &&
+            m_sm.currentState() != EquipState::INTERLOCK)
+            hcack = 0x04;  // 0x04: Command not valid for current state
+        else
+            m_sm.processEvent(EquipEvent::CMD_RESET);
     } else if (rcmd == "ACK_ALARM") {
         m_alarmMgr.tryClear(AlarmId::TEMP_HIGH);
-        m_alarmMgr.tryClear(AlarmId::HUMIDITY_HIGH);
-        m_alarmMgr.tryClear(AlarmId::SENSOR_ERROR);
+        m_alarmMgr.tryClear(AlarmId::HW_INTERLOCK);
     } else {
         hcack = 0x05;
     }

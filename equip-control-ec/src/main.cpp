@@ -7,10 +7,11 @@
 #include <iostream>
 #include <thread>
 
-// ── 센서 유효 범위 (SRS FR-010~012) ────────────────────────────
-constexpr float    TEMP_MAX_C     = 80.0f;
-constexpr float    HUMIDITY_MAX   = 95.0f;
-constexpr uint64_t HB_TIMEOUT_MS  = 10000U;
+// ── 알람 임계값 (EFS-001 SP-01~SP-05) ──────────────────────────
+constexpr float    TEMP_HIGH_C    = 65.0f;   // SP-01: SW ALARM 전이
+constexpr float    TEMP_CRIT_C    = 68.0f;   // SP-02: SW INTERLOCK 전이
+constexpr float    CURR_OPEN_MA   = 50.0f;   // SP-05: HW 인터락 판정 (ST-22 개방)
+constexpr uint64_t HB_TIMEOUT_MS  = 10000U;  // Heartbeat 타임아웃 (10초)
 constexpr uint16_t HSMS_PORT      = 5000U;
 
 static uint64_t nowMs() {
@@ -28,19 +29,19 @@ int main(int argc, char* argv[]) {
 
     // ── StateMachine 상태 변경 → S6F11 이벤트 전송 ────────────
     sm.setStateChangeCallback([&](EquipState prev, EquipState next) {
-        const char* names[] = {"IDLE", "RUNNING", "ALARM", "ERROR"};
+        const char* names[] = {"IDLE", "HEATING", "ALARM", "INTERLOCK"};
         std::cout << "[SM] " << names[static_cast<int>(prev)]
                   << " -> " << names[static_cast<int>(next)] << "\n";
 
-        if (next == EquipState::RUNNING) {
-            // STM32 LD2(PA5) ON
-            std::cout << "LD2 ON" << std::endl;
+        if (next == EquipState::HEATING) {
+            // STM32 LD2(PA5) ON — 히터 가동 시작
             CmdLedPayload ledOn{ 2 };
             bool ok = devComm.sendCommand(MSG_CMD_LED,
                                 reinterpret_cast<const uint8_t*>(&ledOn),
                                 sizeof(ledOn));
             std::cout << "[EC] sendCommand LED ON: " << (ok ? "ACK" : "TIMEOUT") << "\n";
-            hsmsSrv.sendEventReport(3U, nullptr, 0);  // CEID-3 ProcessStart
+            if (prev == EquipState::IDLE)
+                hsmsSrv.sendEventReport(3U, nullptr, 0);  // CEID-3 ProcessStart
         } else if (next == EquipState::IDLE) {
             // STM32 LD2(PA5) OFF
             CmdLedPayload ledOff{ 0 };
@@ -48,7 +49,7 @@ int main(int argc, char* argv[]) {
                                 reinterpret_cast<const uint8_t*>(&ledOff),
                                 sizeof(ledOff));
             std::cout << "[EC] sendCommand LED OFF: " << (ok ? "ACK" : "TIMEOUT") << "\n";
-            if (prev == EquipState::RUNNING)
+            if (prev == EquipState::HEATING)
                 hsmsSrv.sendEventReport(4U, nullptr, 0);  // CEID-4 ProcessComplete
         }
     });
@@ -86,15 +87,52 @@ int main(int argc, char* argv[]) {
                 }
             };
 
+            // ALID=1 TEMP_HIGH: SW-AL (65°C 초과) — AIM-001
             checkAlarm(AlarmId::TEMP_HIGH,
-                       sensor.temperature > TEMP_MAX_C,
-                       1, "Temperature High");
-            checkAlarm(AlarmId::HUMIDITY_HIGH,
-                       sensor.humidity > HUMIDITY_MAX,
-                       2, "Humidity High");
-            checkAlarm(AlarmId::SENSOR_ERROR,
-                       sensor.sht31_error || sensor.ina219_error,
-                       3, "Sensor Error");
+                       sensor.temperature > TEMP_HIGH_C,
+                       1, "TEMP_HIGH: Chamber temperature exceeded 65C");
+
+            // ALID=2 TEMP_CRITICAL: SW-IL (68°C 초과) — INTERLOCK 전이
+            {
+                bool triggered = sensor.temperature > TEMP_CRIT_C;
+                bool wasClear  = !alarmMgr.isActive(AlarmId::TEMP_CRITICAL);
+                if (triggered) {
+                    alarmMgr.checkAndSetInterlock(AlarmId::TEMP_CRITICAL);
+                    if (wasClear)
+                        hsmsSrv.sendAlarmReport(2, true,
+                            "TEMP_CRITICAL: Interlock activated at 68C");
+                } else {
+                    bool wasSet = alarmMgr.isActive(AlarmId::TEMP_CRITICAL);
+                    alarmMgr.tryClear(AlarmId::TEMP_CRITICAL);
+                    if (wasSet)
+                        hsmsSrv.sendAlarmReport(2, false,
+                            "TEMP_CRITICAL: Interlock activated at 68C");
+                }
+            }
+
+            // ALID=4 HW_INTERLOCK: ST-22 개방 감지 (HEATING 중 전류 < 50mA)
+            checkAlarm(AlarmId::HW_INTERLOCK,
+                       sm.currentState() == EquipState::HEATING
+                           && sensor.current_mA < CURR_OPEN_MA,
+                       4, "HW_INTERLOCK: ST-22 operated or circuit open");
+
+            // ALID=5 SENSOR_ERROR: SW-IL — SHT31/INA219 I2C 오류
+            {
+                bool triggered = sensor.sht31_error || sensor.ina219_error;
+                bool wasClear  = !alarmMgr.isActive(AlarmId::SENSOR_ERROR);
+                if (triggered) {
+                    alarmMgr.checkAndSetInterlock(AlarmId::SENSOR_ERROR);
+                    if (wasClear)
+                        hsmsSrv.sendAlarmReport(5, true,
+                            "SENSOR_ERROR: SHT31 communication failure");
+                } else {
+                    bool wasSet = alarmMgr.isActive(AlarmId::SENSOR_ERROR);
+                    alarmMgr.tryClear(AlarmId::SENSOR_ERROR);
+                    if (wasSet)
+                        hsmsSrv.sendAlarmReport(5, false,
+                            "SENSOR_ERROR: SHT31 communication failure");
+                }
+            }
 
             // 센서 데이터 S6F11 CEID-8 전송 (F4×4 페이로드)
             uint8_t rpt[24];
@@ -124,7 +162,7 @@ int main(int argc, char* argv[]) {
             if (btn.event_type == 0) {
                 if (sm.currentState() == EquipState::IDLE)
                     sm.processEvent(EquipEvent::CMD_START);
-                else if (sm.currentState() == EquipState::RUNNING)
+                else if (sm.currentState() == EquipState::HEATING)
                     sm.processEvent(EquipEvent::CMD_STOP);
             }
             break;
@@ -167,10 +205,16 @@ int main(int argc, char* argv[]) {
         uint64_t lastRx = devComm.lastRxTimeMs();
         if (lastRx > 0 && (nowMs() - lastRx) > HB_TIMEOUT_MS) {
             std::cerr << "[EC] Heartbeat timeout\n";
-            bool wasClear = !alarmMgr.isActive(AlarmId::UART_COMM_ERROR);
-            alarmMgr.checkAndSet(AlarmId::UART_COMM_ERROR);
+            bool wasClear = !alarmMgr.isActive(AlarmId::COMM_ERROR);
+            alarmMgr.checkAndSet(AlarmId::COMM_ERROR);
             if (wasClear)
-                hsmsSrv.sendAlarmReport(4, true, "UART Comm Error");
+                hsmsSrv.sendAlarmReport(6, true,
+                    "COMM_ERROR: STM32 heartbeat timeout");
+        } else if (alarmMgr.isActive(AlarmId::COMM_ERROR)) {
+            // Heartbeat 재수신 → COMM_ERROR 자동 해제 (AIM-001 §7)
+            alarmMgr.tryClear(AlarmId::COMM_ERROR);
+            hsmsSrv.sendAlarmReport(6, false,
+                "COMM_ERROR: STM32 heartbeat timeout");
         }
     }
 

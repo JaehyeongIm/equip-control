@@ -8,6 +8,12 @@ void AlarmManager::checkAndSet(AlarmId id) {
     m_sm.processEvent(EquipEvent::EVENT_ALARM);
 }
 
+void AlarmManager::checkAndSetInterlock(AlarmId id) {
+    if (m_alarms[id]) return;  // 이미 활성
+    m_alarms[id] = true;
+    m_sm.processEvent(EquipEvent::EVENT_INTERLOCK);
+}
+
 void AlarmManager::tryClear(AlarmId id) {
     m_alarms[id] = false;
     if (!hasActiveAlarm())
