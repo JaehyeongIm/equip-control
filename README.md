@@ -1,20 +1,120 @@
-# 가상 공정 챔버 기반 장비 이상 진단·인터락·PM 시뮬레이터
-  
-Lock&Lock 밀폐 용기를 가상 공정 챔버로 삼아 히터 제어·과온 인터락·PM 스케줄링을 구현하고  
-SECS/GEM(HSMS + SECS-II) 프로토콜로 Host에 실시간 보고합니다.
+# SECS/GEM 기반 가상 챔버 과온 감지 및 안전 복구 시스템
+
+Lock&Lock 밀폐 용기를 가상 공정 챔버로 삼아 **히터 과온 발생 → 자동 인터락 → 원인 진단 → 운영자 가이드 복구**의 전체 사이클을 실제 하드웨어로 구현합니다.
+
+반도체 장비 CS 엔지니어의 현장 대응 역량을 실증하기 위한 포트폴리오 프로젝트입니다.
+
+---
+
+## 시스템 구성
 
 ```
-STM32 FW (C)              EC (macOS, C++)              Host (macOS, Python)
-────────────              ───────────────              ────────────────────
-FreeRTOS 6태스크      →   DeviceComm (UART)      →     HsmsClient (TCP)
-SHT31 온습도              StateMachine                  curses GUI
-INA219 전류/전압           FaultDiagnosis                챔버 상태 표시
-릴레이/팬/부저 제어         InterlockChecker              알람/PM 모니터링
-도어 리미트 스위치          AlarmManager (ALID 1~7)       S2F41 명령 입력
-UART 바이너리 프레임        PMTracker
-                          HsmsServer (HSMS/TCP)
-                          ※ EC · Host 동일 MacBook, localhost:5000
+┌─────────────────────┐      UART/Binary      ┌─────────────────────┐      HSMS/TCP      ┌──────────────────────┐
+│   STM32 FW (C)      │ ──────────────────►   │    EC (C++, macOS)  │ ──────────────────► │  Host (Python, macOS)│
+│                     │                       │                     │                    │                      │
+│  FreeRTOS 멀티태스크 │                       │  GEM 상태 머신       │                    │  curses 진단 패널    │
+│  SHT31 온도 측정     │ ◄──────────────────   │  ALID 알람 판정      │ ◄──────────────── │  원인 후보 표시      │
+│  INA219 전류 측정    │                       │  이중 인터락 실행    │                    │  점검 체크리스트     │
+│  MOSFET PWM 히터     │                       │  SECS/GEM S5F1 보고  │                    │  복구 조건 추적      │
+│  SW-102T HW 인터락   │                       │  S2F41 명령 처리     │                    │  RESET 허용/거부     │
+└─────────────────────┘                       └─────────────────────┘                    └──────────────────────┘
 ```
+
+---
+
+## 시나리오: 과온 (Over-Temperature)
+
+```
+HEATING 중
+  │ SHT31 온도 > 65°C
+  ▼
+ALARM 전이 — PWM=0%, 팬 ON, 부저 ON
+  │          S5F1 (ALID=1) 보고 → Host 진단 패널 활성화
+  │ 온도 > 68°C (계속 상승)
+  ▼
+INTERLOCK 전이 — S5F1 (ALID=2) 보고
+  │ 온도 72°C 도달
+  ▼
+SW-102T 물리 차단 — INA219 전류 소실 감지 → ALID=4
+  │
+  ▼
+Host: 원인 분류 (전류값 기반) → 점검 항목 표시 → 복구 조건 확인 → RESET
+```
+
+---
+
+## 이중 인터락 구조
+
+```
+65°C ── SW ALARM      EC 소프트웨어 감지, PWM=0%
+68°C ── SW INTERLOCK  EC 소프트웨어 감지, RESET 필요
+72°C ── HW INTERLOCK  SW-102T 바이메탈 물리 차단 (EC 독립)
+```
+
+---
+
+## 하드웨어 구성
+
+| 부품 | 역할 | 인터페이스 |
+|------|------|-----------|
+| STM32 NUCLEO-F411RE | 메인 MCU, FreeRTOS | — |
+| Sensirion SHT31 | 챔버 온습도 측정 | I2C (0x44) |
+| TI INA219 | 히터 전류/전압 측정 | I2C (0x40) |
+| 카프톤 필름 히터 12V/10W | 챔버 가열 | — |
+| IRLZ44NPBF MOSFET | 히터 PWM 제어 (1kHz) | PB0 (TIM3_CH3) |
+| SW-102T 72°C 서모스탯 | HW 과온 인터락 | 히터 직렬 회로 |
+| 냉각 팬 5V | 강제 냉각 (ALARM 시 자동 ON) | PB4 (IRF520) |
+| 액티브 부저 3.3V | 알람 경보 | PB10 |
+| Lock&Lock 밀폐용기 | 가상 공정 챔버 (~1L) | — |
+
+---
+
+## 알람 정의 (AIM-001 기준)
+
+| ALID | 알람명 | 발생 조건 | 자동 대응 |
+|------|--------|---------|---------|
+| 1 | TEMP_HIGH | SHT31 온도 > 65°C | PWM=0%, 팬 ON, 부저 ON |
+| 2 | TEMP_CRITICAL | SHT31 온도 > 68°C | INTERLOCK 전이, S5F1 보고 |
+| 4 | HW_INTERLOCK | INA219 전류 < 50mA (PWM ON 중) | EC 화면 경고, 운영자 확인 |
+| 5 | SENSOR_ERROR | SHT31 I2C 오류 연속 3회 | PWM=0%, S5F1 보고 |
+| 6 | COMM_ERROR | Heartbeat 10초 미수신 | 제어 명령 차단 |
+
+---
+
+## 실행 방법
+
+### 1단계 — 펌웨어 플래시 (STM32CubeIDE)
+
+```
+1. STM32CubeIDE 실행
+2. equip-control-fw 프로젝트 임포트
+3. Run (▶) — 빌드 → Flash → 실행
+```
+
+### 2단계 — EC 빌드 및 실행 (터미널 1)
+
+```bash
+cd equip-control-ec
+cmake -B build && cmake --build build
+./build/ec /dev/tty.usbmodem*
+```
+
+### 3단계 — Host 실행 (터미널 2)
+
+```bash
+cd equip-control-host
+python3 main.py
+```
+
+### Host 명령어
+
+| 명령 | 설명 |
+|------|------|
+| `START` | 챔버 가열 시작 (IDLE → HEATING) |
+| `STOP` | 챔버 가열 중지 |
+| `CHECK <번호>` | 점검 체크리스트 항목 완료 처리 |
+| `RESET` | 복구 조건 확인 후 알람 해제 (→ IDLE) |
+| `QUIT` | 프로그램 종료 |
 
 ---
 
@@ -22,225 +122,31 @@ UART 바이너리 프레임        PMTracker
 
 ```
 equip-control/
-├── equip-control-fw/       # STM32 펌웨어 (STM32CubeIDE)
-├── equip-control-ec/       # EC 소프트웨어 (C++, CMake)
-├── equip-control-host/     # Host 프로그램 (Python)
-├── SRS.md                  # 소프트웨어 요구사항 명세 (IEEE 29148-2018, v2.0)
-├── SDD.md                  # 소프트웨어 설계 문서 (IEEE 1016-2009, v2.0)
-└── ARCHITECTURE.md         # 3계층 아키텍처 다이어그램
+├── equip-control-fw/           # STM32 펌웨어 (C, FreeRTOS)
+├── equip-control-ec/           # EC 소프트웨어 (C++, CMake)
+├── equip-control-host/         # Host 프로그램 (Python, curses)
+└── docs/
+    ├── hw/                     # 하드웨어 설계 및 운영 문서
+    │   ├── EFS-001.md          # Equipment Functional Specification
+    │   ├── HDS-001.md          # Hardware/Electrical Design Specification
+    │   ├── IO-001.md           # I/O List & Wiring Diagram
+    │   ├── AIM-001.md          # Alarm / Interlock Matrix
+    │   ├── TRG-001.md          # Troubleshooting & Recovery Guide
+    │   └── TPV-001.md          # Test Plan & Verification Report
+    └── troubleshooting/        # 개발 중 트러블슈팅 기록
+        ├── TROUBLESHOOTING_LED.md
+        └── troubleshooting-fan.md
 ```
 
 ---
 
-## 하드웨어 구성
+## 핵심 문서
 
-| 부품 | 역할 |
+| 문서 | 내용 |
 |------|------|
-| STM32 NUCLEO-F411RE | 메인 MCU |
-| SHT31 | 챔버 내부 온습도 측정 (I2C, 0x45) |
-| INA219 | 히터 전류/전압 측정 (I2C, 0x40) |
-| 카프톤 히터 12V/10W | 챔버 가열 (릴레이 ON/OFF 제어) |
-| 5V 릴레이 모듈 | 히터 전원 스위칭 |
-| SW-102T (72°C) | 하드웨어 과온 인터락 (히터 직렬 회로) |
-| DC 잭 12V | 히터 전원 입력 |
-| 5V 팬 | 챔버 냉각 (MOSFET 제어) |
-| 리미트 스위치 | 챔버 도어 감지 (PA1) |
-| 부저 | 알람 경보 (PB10) |
-| 포텐셔미터 | 아날로그 입력 테스트 (PA0) |
-
-### 이중 과온 인터락
-
-```
-65°C 초과 → EC 소프트웨어 ALARM 전이 → 릴레이 OFF 명령
-68°C 초과 → EC 소프트웨어 INTERLOCK 전이 → 릴레이 OFF 명령
-72°C 도달 → SW-102T 하드웨어 차단 → INA219 전류 소실 감지 → EC INTERLOCK 전이
-도어 열림 → EC 소프트웨어 INTERLOCK 전이 → 릴레이 OFF 명령
-```
-
----
-
-## 1단계 — 펌웨어 빌드 및 플래시 (STM32CubeIDE)
-
-### 사전 준비
-- STM32CubeIDE 설치
-- STM32 NUCLEO-F411RE 보드를 USB로 연결
-
-### 빌드 및 플래시
-
-```
-1. STM32CubeIDE 실행
-2. File → Import → General → Existing Projects into Workspace
-3. equip-control-fw 폴더 선택 → Finish
-4. Run (▶) 버튼 클릭
-   → 자동으로 빌드 → Flash → 실행
-```
-
-### 플래시 후 동작
-| LED | 상태 |
-|-----|------|
-| LD3 (빨간) | 항상 점등 — 3.3V 전원 |
-| LD1 (빨간) | USB 연결 중 점등 — ST-LINK |
-| LD2 (초록) | 챔버 상태 표시 (IDLE: OFF, RUNNING: ON, ALARM: 점멸) |
-
----
-
-## 2단계 — EC 빌드 및 실행 (macOS, 터미널 1)
-
-### 사전 준비
-- CMake 설치 (`brew install cmake`)
-- Xcode Command Line Tools (`xcode-select --install`)
-
-### 빌드
-
-```bash
-cd equip-control-ec
-cmake -B build && cmake --build build
-```
-
-### 실행
-
-```bash
-# 장치명 확인: ls /dev/tty.usbmodem*
-./build/ec /dev/tty.usbmodem21303
-```
-
-### EC 실행 시 동작
-- STM32 UART 연결 후 센서 데이터 수신 시작
-- TCP 포트 5000에서 Host 연결 대기
-- 콘솔에 수신 로그 출력:
-  ```
-  [EC] UART connected: /dev/tty.usbmodem21303
-  [HSMS] Listening on port 5000
-  [STATE] IDLE
-  [SENSOR] temp=25.3C humi=42.1% curr=0mA volt=12.0V
-  [HB] seq=0
-  ```
-
----
-
-## 3단계 — Host 실행 (macOS, 터미널 2)
-
-### 사전 준비
-
-```bash
-# Python 3.8 이상
-python3 --version
-```
-
-### 실행
-
-```bash
-cd equip-control-host
-python3 main.py
-```
-
-### 화면 구성
-
-```
-==================================================
-   가상 공정 챔버 장비 제어 시스템
-==================================================
-[State]   Chamber: IDLE      | Online: YES
-[Sensor]  Temp: 25.3C  Humi: 42.1%  Curr: 0mA  Volt: 12.0V
-[PM]      가동시간: 0.0h  사이클: 0  (PM 불필요)
-[Alarm]   Active: 0  (알람 없음)
---------------------------------------------------
-[Events] (최근 10건)
-  10:01:23 | CEID-8 (SENSOR_DATA)
---------------------------------------------------
-Commands: START | STOP | RESET | ACK_ALARM <alid> | PM_RESET | QUIT
->
-```
-
-### 명령어
-
-| 명령 | 설명 |
-|------|------|
-| `START` | 챔버 가열 시작 (IDLE → HEATING) |
-| `STOP` | 챔버 가열 중지 (RUNNING → COOLING) |
-| `RESET` | 알람/인터락 해제 시도 (→ IDLE) |
-| `ACK_ALARM <alid>` | 알람 확인 (alid: 1~7) |
-| `PM_RESET` | PM 카운터 초기화 |
-| `QUIT` | 프로그램 종료 |
-
----
-
-## 전체 실행 순서
-
-```
-1. 하드웨어 연결 확인 (SHT31, INA219, 릴레이, 팬, 리미트 스위치)
-2. STM32 보드를 MacBook에 USB 연결
-3. 터미널 1 — EC 실행:
-     cd equip-control-ec && ./build/ec /dev/tty.usbmodem21303
-4. 터미널 2 — Host 실행:
-     cd equip-control-host && python3 main.py
-5. Host 화면에서 Online: YES 확인
-6. 명령 입력: START → (온도 상승 관찰) → STOP → RESET
-```
-
----
-
-## 알람 ID 목록
-
-| ALID | 알람명 | 발생 조건 |
-|------|--------|-----------|
-| 1 | TEMP_HIGH | 챔버 온도 > 65°C |
-| 2 | TEMP_CRITICAL | 챔버 온도 > 68°C (인터락) |
-| 3 | DOOR_OPEN | 도어 열림 감지 (인터락) |
-| 4 | CURRENT_LOSS | 히터 전류 소실 (SW-102T 동작) |
-| 5 | SENSOR_ERROR | SHT31 또는 INA219 오류 |
-| 6 | COMM_ERROR | Heartbeat 10초 이상 미수신 |
-| 7 | PM_DUE | PM 주기 도래 |
-
----
-
-## 챔버 상태 머신
-
-```
-IDLE ──START──► HEATING ──온도 안정──► RUNNING
-  ▲                │                     │
-  │              과온/도어              STOP
-RESET             │                     │
-  │               ▼                     ▼
-  └──── ALARM ◄──65°C        COOLING ──냉각 완료──► IDLE
-         │
-       68°C / 도어열림
-         │
-         ▼
-      INTERLOCK ──RESET──► IDLE
-         │
-       PM 도래
-         │
-         ▼
-    PM_REQUIRED ──PM_RESET──► IDLE
-```
-
----
-
-## 내부 프로토콜 프레임 구조 (STM32↔EC)
-
-```
-| SOF(1) | TYPE(1) | SEQ(1) | LEN_L(1) | LEN_H(1) | PAYLOAD(n) | CRC_L(1) | CRC_H(1) |
-```
-
-- SOF: 0xAA
-- CRC: CRC16-CCITT (poly=0x1021, init=0xFFFF)
-
-| TYPE | 방향 | 내용 |
-|------|------|------|
-| 0x01 | STM32→EC | MSG_SENSOR_DATA (온도/습도/전류/전압/도어) |
-| 0x02 | STM32→EC | MSG_HEARTBEAT |
-| 0x03 | STM32→EC | MSG_BUTTON_EVENT |
-| 0x04 | STM32→EC | MSG_DOOR_EVENT |
-| 0x10 | EC→STM32 | MSG_CMD_RELAY (히터 릴레이 ON/OFF) |
-| 0x11 | EC→STM32 | MSG_CMD_FAN (팬 ON/OFF) |
-| 0x12 | EC→STM32 | MSG_CMD_BUZZER (부저 ON/OFF) |
-| 0x13 | EC→STM32 | MSG_CMD_LED (LED 패턴) |
-
----
-
-## 관련 문서
-
-- [SRS.md](SRS.md) — 소프트웨어 요구사항 명세 (IEEE 29148-2018, v2.0)
-- [SDD.md](SDD.md) — 소프트웨어 설계 문서 (IEEE 1016-2009, v2.0)
-- [ARCHITECTURE.md](ARCHITECTURE.md) — 3계층 아키텍처 다이어그램
+| [EFS-001](docs/hw/EFS-001.md) | 장비 기능 명세 (상태 머신, 시나리오, Host 진단 패널 스펙) |
+| [AIM-001](docs/hw/AIM-001.md) | 알람/인터락 매트릭스 (ALID별 발생 조건, 자동 대응, 복구 조건) |
+| [TRG-001](docs/hw/TRG-001.md) | 현장 대응 절차서 (원인 진단 트리, 단계별 조치, 복구 검증) |
+| [HDS-001](docs/hw/HDS-001.md) | HW 설계 명세 (MOSFET PWM 회로, 이중 인터락 구조) |
+| [IO-001](docs/hw/IO-001.md) | I/O 목록 및 배선도 (전체 핀 매핑, 회로도) |
+| [TPV-001](docs/hw/TPV-001.md) | 테스트 계획 및 검증 결과 기록 |
