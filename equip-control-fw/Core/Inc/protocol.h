@@ -55,7 +55,7 @@
 
 /* SENSOR_DATA 페이로드 — 22 bytes (FR-001~004) */
 typedef struct __attribute__((packed)) {
-    uint8_t  flags;         /* bit0=sht31_valid, bit1=ina219_valid */
+    uint8_t  flags;         /* bit0=sht31_valid, bit1=ina219_valid, bit2=door_open */
     uint8_t  sht31_error;   /* SENSOR_ERR_* (flags.bit0==0일 때 유효) */
     uint8_t  ina219_error;  /* SENSOR_ERR_* (flags.bit1==0일 때 유효) */
     float    temperature;   /* °C */

@@ -363,15 +363,22 @@ void StartTaskSensor(void *argument)
 
     watchdog_checkin(TASK_ID_SENSOR);
 
+    /* 도어 스위치 읽기 (PA1, NO 접점 + Pull-Up, 페일세이프)
+     * HIGH(SET) = 도어 열림 또는 배선 단선 → door_open=1
+     * LOW(RESET) = 도어 닫힘 → door_open=0
+     */
+    uint8_t door_open = (HAL_GPIO_ReadPin(DOOR_SW_GPIO_Port, DOOR_SW_Pin)
+                         == GPIO_PIN_SET) ? 1U : 0U;
+
     /* SHT31 온습도 측정 */
     SHT31_Data sht;
     if (SHT31_Read(&sht) == SHT31_OK) {
-      data.flags       = 0x01U;        /* sht31_valid */
+      data.flags       = 0x01U | (door_open << 2U);  /* bit0=sht31_valid, bit2=door_open */
       data.sht31_error = SENSOR_ERR_NONE;
       data.temperature = sht.temperature;
       data.humidity    = sht.humidity;
     } else {
-      data.flags       = 0x00U;
+      data.flags       = 0x00U | (door_open << 2U);  /* bit2=door_open */
       data.sht31_error = SENSOR_ERR_I2C_NACK;
       data.temperature = 0.0f;
       data.humidity    = 0.0f;

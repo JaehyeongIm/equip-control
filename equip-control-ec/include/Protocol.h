@@ -21,7 +21,7 @@ constexpr uint16_t PROTO_MAX_FRAME = 128U;
 #pragma pack(push, 1)
 
 struct SensorDataPayload {
-    uint8_t  flags;
+    uint8_t  flags;         // bit0=sht31_valid, bit1=ina219_valid, bit2=door_open
     uint8_t  sht31_error;
     uint8_t  ina219_error;
     float    temperature;

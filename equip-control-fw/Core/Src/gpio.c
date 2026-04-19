@@ -76,6 +76,15 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : DOOR_SW_Pin (PA1, NO 접점, 페일세이프)
+   * HIGH = 도어 열림 또는 배선 단선 → 알람
+   * LOW  = 도어 닫힘 (NO 접점 눌림)
+   */
+  GPIO_InitStruct.Pin = DOOR_SW_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(DOOR_SW_GPIO_Port, &GPIO_InitStruct);
+
   /*Configure GPIO pin : D4_Pin */
   GPIO_InitStruct.Pin = D4_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
