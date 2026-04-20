@@ -22,6 +22,7 @@
 #include "iwdg.h"
 #include "i2c.h"
 #include "sht31.h"
+#include "tim.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
@@ -293,7 +294,7 @@ static void test_ina219(void)
 
 static void test_fan(void)
 {
-    tprint("\r\n=== [5/5] FAN (IRF520) TEST  (PB4 / D5) ===\r\n");
+    tprint("\r\n=== [5/6] FAN RELAY TEST  (PB4 / D5) ===\r\n");
     tprint("PB4 → 1kΩ → IRF520 SIG\r\n");
     tprint("팬+ → 5V,  팬- → IRF520 M+,  M- → GND\r\n");
 
@@ -314,6 +315,85 @@ static void test_fan(void)
 }
 
 /* ─────────────────────────────────────────────────────────────── */
+/*  Test 6: 히터 PWM (PB0 / D3, TIM3_CH3)                        */
+/* ─────────────────────────────────────────────────────────────── */
+
+static void test_heater(void)
+{
+    tprint("\r\n=== [6/6] HEATER PWM TEST  (PB0 / D3, TIM3_CH3) ===\r\n");
+    tprint("경고: 24V 전원, ST-22, INA219, IRLZ44NPBF 배선 확인 후 진행\r\n");
+    tprint("20%% Duty로 5회 측정 후 자동 정지\r\n");
+
+    /* PB0 핀 확인: GPIO HIGH 3초 → 멀티미터로 A3 전압 확인 */
+    tprint("  >> PB0 GPIO HIGH 3초 — A3에서 3.3V 나오면 핀 OK\r\n");
+    GPIO_InitTypeDef gtest = {0};
+    gtest.Pin   = GPIO_PIN_0;
+    gtest.Mode  = GPIO_MODE_OUTPUT_PP;
+    gtest.Pull  = GPIO_NOPULL;
+    gtest.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOB, &gtest);
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);
+    test_delay_ms(3000U);
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
+    tprint("  >> GPIO 테스트 완료 — 3.3V 나왔으면 핀 OK, 0V면 핀 오류\r\n");
+
+    /* PB0을 다시 AF2(TIM3_CH3)로 복구 */
+    gtest.Mode      = GPIO_MODE_AF_PP;
+    gtest.Alternate = GPIO_AF2_TIM3;
+    HAL_GPIO_Init(GPIOB, &gtest);
+
+    /* INA219 캘리브레이션 재설정 (Cal=4096, Current_LSB=100uA) */
+    uint8_t wbuf[2] = {0x10U, 0x00U};
+    HAL_I2C_Mem_Write(&hi2c1, INA219_ADDR, INA219_REG_CALIB,
+                      I2C_MEMADD_SIZE_8BIT, wbuf, 2, 10);
+
+    /* PWM 시작: 100% Duty (CCR=1000, ARR=999, 1kHz) */
+    HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 1000U);
+    tprint("  >> HEATER ON (100%% Duty ~26W)\r\n");
+
+    /* 30회 측정 (1초 간격, 총 30초) */
+    int heater_detected = 0;
+    for (int i = 1; i <= 30; i++) {
+        uint8_t  tmp[2];
+        uint16_t bus_raw = 0U, curr_raw = 0U;
+
+        HAL_I2C_Mem_Read(&hi2c1, INA219_ADDR, INA219_REG_BUS,
+                         I2C_MEMADD_SIZE_8BIT, tmp, 2, 10);
+        bus_raw = ((uint16_t)tmp[0] << 8) | tmp[1];
+
+        HAL_I2C_Mem_Read(&hi2c1, INA219_ADDR, INA219_REG_CURRENT,
+                         I2C_MEMADD_SIZE_8BIT, tmp, 2, 10);
+        curr_raw = ((uint16_t)tmp[0] << 8) | tmp[1];
+
+        uint32_t vbus_mv = (bus_raw >> 3U) * 4U;
+        int32_t  curr_ua = (int32_t)(int16_t)curr_raw * 100;
+
+        tprint("  [%d] Vbus=%lu.%03lu V  I=%ld uA\r\n",
+               i,
+               (unsigned long)(vbus_mv / 1000U),
+               (unsigned long)(vbus_mv % 1000U),
+               (long)curr_ua);
+
+        if (curr_ua > 500000L)
+            heater_detected = 1;
+
+        test_delay_ms(1000U);
+    }
+
+    /* PWM 정지 */
+    HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_3);
+    tprint("  >> HEATER OFF\r\n");
+
+    if (heater_detected)
+        tprint(">>> OK: 히터 전류 감지됨\r\n");
+    else
+        tprint(">>> 주의: 전류 미감지 — PWM 타이밍 불일치일 수 있음\r\n"
+               "    Vbus가 24V 근처이면 배선 정상, INA219 타이밍 문제\r\n"
+               "    Vbus=0V 이면 24V 전원 또는 배선 재확인\r\n");
+}
+
+/* ─────────────────────────────────────────────────────────────── */
 /*  진입점                                                         */
 /* ─────────────────────────────────────────────────────────────── */
 
@@ -327,14 +407,12 @@ void test_periph_run(void)
     tprint("########################################\r\n");
 
     gpio_periph_init();
-    adc1_init_raw();
     /* I2C1: MX_I2C1_Init()이 main.c에서 이미 초기화함 */
 
-    test_buzzer();
-    test_potentiometer();
     test_sht31();
     test_ina219();
     test_fan();
+    test_heater();
 
     tprint("\r\n########################################\r\n");
     tprint("  ALL TESTS DONE\r\n");
