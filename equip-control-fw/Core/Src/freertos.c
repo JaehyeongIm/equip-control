@@ -23,6 +23,8 @@
 #include "stm32f4xx.h"
 #include "i2c.h"
 #include "sht31.h"
+#include "ina219.h"
+#include "tim.h"
 #include <string.h>
 
 static void dbg(const char *s) {
@@ -355,6 +357,7 @@ void StartTaskButton(void *argument)
 void StartTaskSensor(void *argument)
 {
   /* USER CODE BEGIN StartTaskSensor */
+  INA219_Init();
   watchdog_checkin(TASK_ID_SENSOR);
   for(;;)
   {
@@ -384,10 +387,18 @@ void StartTaskSensor(void *argument)
       data.humidity    = 0.0f;
     }
 
-    /* INA219 미구현 — 더미 유지 */
-    data.ina219_error = SENSOR_ERR_NONE;
-    data.current_mA   = 0.0f;
-    data.voltage_V    = 0.0f;
+    /* INA219 전류/전압 측정 */
+    INA219_Data ina;
+    if (INA219_Read(&ina) == INA219_OK) {
+      data.flags      |= 0x02U;              /* bit1=ina219_valid */
+      data.ina219_error = SENSOR_ERR_NONE;
+      data.current_mA   = ina.current_mA;
+      data.voltage_V    = ina.voltage_V;
+    } else {
+      data.ina219_error = SENSOR_ERR_I2C_NACK;
+      data.current_mA   = 0.0f;
+      data.voltage_V    = 0.0f;
+    }
     data.timestamp_ms = osKernelGetTickCount();
 
     /* 공유 버퍼 갱신 */
@@ -424,24 +435,40 @@ void StartTaskActuator(void *argument)
     watchdog_checkin(TASK_ID_ACTUATOR);
     if (osMessageQueueGet(xQueueRxCmd, &frame, NULL, 100U) == osOK) {
       switch (frame.type) {
+
+      case MSG_CMD_HEATER: {
+        CmdHeaterPayload_t *p = (CmdHeaterPayload_t *)frame.payload;
+        if (p->duty_percent == 0U) {
+          HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_3);
+        } else {
+          uint32_t ccr = (uint32_t)p->duty_percent * 1000U / 100U;
+          __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, ccr);
+          HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);
+        }
+        break;
+      }
+
       case MSG_CMD_FAN: {
         CmdFanPayload_t *p = (CmdFanPayload_t *)frame.payload;
-        /* TODO: 팬 GPIO — 현재 내장 LD2(PA5)로 대체 */
-        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5,
+        HAL_GPIO_WritePin(IRF520_FAN_GPIO_Port, IRF520_FAN_Pin,
                           p->on ? GPIO_PIN_SET : GPIO_PIN_RESET);
         break;
       }
-      case MSG_CMD_BUZZER:
-        /* TODO: 부저 GPIO 제어 */
-        break;
-      case MSG_CMD_LED: {
-        CmdLedPayload_t *p = (CmdLedPayload_t *)frame.payload;
-        dbg("[ACTUATOR] MSG_CMD_LED\r\n");
-        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5,
-                          p->state ? GPIO_PIN_SET : GPIO_PIN_RESET);
-        dbg(p->state ? "[ACTUATOR] LD2 ON\r\n" : "[ACTUATOR] LD2 OFF\r\n");
+
+      case MSG_CMD_BUZZER: {
+        CmdBuzzerPayload_t *p = (CmdBuzzerPayload_t *)frame.payload;
+        HAL_GPIO_WritePin(D6_Active_Buzzer_GPIO_Port, D6_Active_Buzzer_Pin,
+                          p->on ? GPIO_PIN_SET : GPIO_PIN_RESET);
         break;
       }
+
+      case MSG_CMD_LED: {
+        CmdLedPayload_t *p = (CmdLedPayload_t *)frame.payload;
+        HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin,
+                          p->state ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        break;
+      }
+
       default:
         break;
       }

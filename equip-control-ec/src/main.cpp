@@ -28,27 +28,65 @@ int main(int argc, char* argv[]) {
     DeviceComm    devComm(port);
 
     // ── StateMachine 상태 변경 → S6F11 이벤트 전송 ────────────
+    auto sendHeater = [&](uint8_t duty) {
+        CmdHeaterPayload p{ duty };
+        bool ok = devComm.sendCommand(MSG_CMD_HEATER,
+                      reinterpret_cast<const uint8_t*>(&p), sizeof(p));
+        std::cout << "[EC] HEATER duty=" << static_cast<int>(duty)
+                  << "%: " << (ok ? "ACK" : "TIMEOUT") << "\n";
+    };
+    auto sendFan = [&](uint8_t on) {
+        CmdFanPayload p{ on };
+        bool ok = devComm.sendCommand(MSG_CMD_FAN,
+                      reinterpret_cast<const uint8_t*>(&p), sizeof(p));
+        std::cout << "[EC] FAN " << (on ? "ON" : "OFF")
+                  << ": " << (ok ? "ACK" : "TIMEOUT") << "\n";
+    };
+    auto sendBuzzer = [&](uint8_t on) {
+        CmdBuzzerPayload p{ on };
+        bool ok = devComm.sendCommand(MSG_CMD_BUZZER,
+                      reinterpret_cast<const uint8_t*>(&p), sizeof(p));
+        std::cout << "[EC] BUZZER " << (on ? "ON" : "OFF")
+                  << ": " << (ok ? "ACK" : "TIMEOUT") << "\n";
+    };
+    auto sendLed = [&](uint8_t state) {
+        CmdLedPayload p{ state };
+        devComm.sendCommand(MSG_CMD_LED,
+            reinterpret_cast<const uint8_t*>(&p), sizeof(p));
+    };
+
     sm.setStateChangeCallback([&](EquipState prev, EquipState next) {
         const char* names[] = {"IDLE", "HEATING", "ALARM", "INTERLOCK"};
         std::cout << "[SM] " << names[static_cast<int>(prev)]
                   << " -> " << names[static_cast<int>(next)] << "\n";
 
         if (next == EquipState::HEATING) {
-            // STM32 LD2(PA5) ON — 히터 가동 시작
-            CmdLedPayload ledOn{ 2 };
-            bool ok = devComm.sendCommand(MSG_CMD_LED,
-                                reinterpret_cast<const uint8_t*>(&ledOn),
-                                sizeof(ledOn));
-            std::cout << "[EC] sendCommand LED ON: " << (ok ? "ACK" : "TIMEOUT") << "\n";
+            sendHeater(100);
+            sendFan(0);
+            sendBuzzer(0);
+            sendLed(LED_STATE_RUN);
             if (prev == EquipState::IDLE)
                 hsmsSrv.sendEventReport(3U, nullptr, 0);  // CEID-3 ProcessStart
+
+        } else if (next == EquipState::ALARM) {
+            // AIM-001: 65°C 초과 → PWM 감소, 팬 ON, 부저 ON
+            sendHeater(50);
+            sendFan(1);
+            sendBuzzer(1);
+            sendLed(LED_STATE_ALARM);
+
+        } else if (next == EquipState::INTERLOCK) {
+            // AIM-001: 68°C 초과 → PWM=0
+            sendHeater(0);
+            sendFan(1);
+            sendBuzzer(1);
+            sendLed(LED_STATE_ERROR);
+
         } else if (next == EquipState::IDLE) {
-            // STM32 LD2(PA5) OFF
-            CmdLedPayload ledOff{ 0 };
-            bool ok = devComm.sendCommand(MSG_CMD_LED,
-                                reinterpret_cast<const uint8_t*>(&ledOff),
-                                sizeof(ledOff));
-            std::cout << "[EC] sendCommand LED OFF: " << (ok ? "ACK" : "TIMEOUT") << "\n";
+            sendHeater(0);
+            sendFan(0);
+            sendBuzzer(0);
+            sendLed(LED_STATE_IDLE);
             if (prev == EquipState::HEATING)
                 hsmsSrv.sendEventReport(4U, nullptr, 0);  // CEID-4 ProcessComplete
         }

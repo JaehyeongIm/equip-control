@@ -11,8 +11,14 @@ constexpr uint8_t MSG_CMD_FAN        = 0x10U;
 constexpr uint8_t MSG_CMD_BUZZER     = 0x11U;
 constexpr uint8_t MSG_CMD_LED        = 0x12U;
 constexpr uint8_t MSG_CMD_STATE_SYNC = 0x13U;
+constexpr uint8_t MSG_CMD_HEATER     = 0x14U;
 constexpr uint8_t MSG_HEARTBEAT_REQ  = 0x20U;
 constexpr uint8_t MSG_HEARTBEAT_ACK  = 0x21U;
+
+constexpr uint8_t LED_STATE_IDLE    = 0x01U;
+constexpr uint8_t LED_STATE_RUN     = 0x02U;
+constexpr uint8_t LED_STATE_ALARM   = 0x03U;
+constexpr uint8_t LED_STATE_ERROR   = 0x04U;
 
 constexpr uint8_t  PROTO_SOF       = 0xAAU;
 constexpr uint16_t PROTO_MAX_FRAME = 128U;
@@ -46,10 +52,11 @@ struct AckPayload {
     uint8_t ack_seq;
 };
 
-struct CmdFanPayload    { uint8_t on; };
-struct CmdBuzzerPayload { uint8_t on; };
-struct CmdLedPayload    { uint8_t state; };  // 1=ON, 0=OFF
-struct CmdStateSyncPayload { uint8_t state; };
+struct CmdFanPayload        { uint8_t on; };
+struct CmdBuzzerPayload     { uint8_t on; };
+struct CmdLedPayload        { uint8_t state; };  // 1=ON, 0=OFF
+struct CmdStateSyncPayload  { uint8_t state; };
+struct CmdHeaterPayload     { uint8_t duty_percent; };  // 0=OFF, 100=최대출력
 
 #pragma pack(pop)
 

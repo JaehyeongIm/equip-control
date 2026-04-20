@@ -31,6 +31,7 @@
 #define MSG_CMD_BUZZER          0x11U
 #define MSG_CMD_LED             0x12U
 #define MSG_CMD_STATE_SYNC      0x13U
+#define MSG_CMD_HEATER          0x14U
 #define MSG_HEARTBEAT_REQ       0x20U
 #define MSG_HEARTBEAT_ACK       0x21U
 
@@ -84,6 +85,11 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     uint8_t state;          /* LED_STATE_* */
 } CmdLedPayload_t;
+
+/* CMD_HEATER 페이로드 — 1 byte */
+typedef struct __attribute__((packed)) {
+    uint8_t duty_percent;   /* 0=OFF, 100=최대출력(26W) */
+} CmdHeaterPayload_t;
 
 /* RESTART_REASON 페이로드 — 3 bytes (FR-024) */
 typedef struct __attribute__((packed)) {
