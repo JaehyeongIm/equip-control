@@ -101,12 +101,12 @@ int main(void)
   /* USER CODE BEGIN 2 */
   HAL_Delay(3000);
 
-  uint8_t duty = 100;
-  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, duty * 10);
-  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);
+  /* 초기 상태: 히터 OFF, 팬 OFF */
+  uint8_t duty = 20;
+  HAL_GPIO_WritePin(FAN_RELAY_GPIO_Port, FAN_RELAY_Pin, GPIO_PIN_RESET);
 
-  char init_buf[48];
-  snprintf(init_buf, sizeof(init_buf), "[S3] Heater ON  duty=%d%%\r\n", duty);
+  char init_buf[64];
+  snprintf(init_buf, sizeof(init_buf), "[S4] Start: heater duty=%d%% fan=OFF\r\n", duty);
   HAL_UART_Transmit(&huart2, (uint8_t *)init_buf, strlen(init_buf), 100);
   /* USER CODE END 2 */
 
@@ -114,13 +114,25 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+    /* 히터 ON + 팬 ON */
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, duty * 10);
+    HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);
+    HAL_GPIO_WritePin(FAN_RELAY_GPIO_Port, FAN_RELAY_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
 
-    char buf[48];
-    snprintf(buf, sizeof(buf), "[S3] duty=%d%%  running\r\n", duty);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "[S4] Heater ON  duty=%d%%  Fan ON\r\n", duty);
     HAL_UART_Transmit(&huart2, (uint8_t *)buf, strlen(buf), 100);
+    HAL_Delay(3000);
 
-    HAL_Delay(1000);
+    /* 히터 OFF + 팬 OFF */
+    HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_3);
+    HAL_GPIO_WritePin(FAN_RELAY_GPIO_Port, FAN_RELAY_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+
+    snprintf(buf, sizeof(buf), "[S4] Heater OFF         Fan OFF\r\n");
+    HAL_UART_Transmit(&huart2, (uint8_t *)buf, strlen(buf), 100);
+    HAL_Delay(3000);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -310,7 +322,7 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, FAN_RELAY_Pin|LD2_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : B1_Pin */
   GPIO_InitStruct.Pin = B1_Pin;
@@ -318,12 +330,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : LD2_Pin */
-  GPIO_InitStruct.Pin = LD2_Pin;
+  /*Configure GPIO pins : FAN_RELAY_Pin LD2_Pin */
+  GPIO_InitStruct.Pin = FAN_RELAY_Pin|LD2_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
