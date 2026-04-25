@@ -12,7 +12,7 @@ constexpr float    TEMP_HIGH_C    = 65.0f;   // SP-01: SW ALARM 전이
 constexpr float    TEMP_CRIT_C    = 68.0f;   // SP-02: SW INTERLOCK 전이
 constexpr float    CURR_OPEN_MA   = 50.0f;   // SP-05: HW 인터락 판정 (ST-22 개방)
 constexpr uint64_t HB_TIMEOUT_MS  = 10000U;  // Heartbeat 타임아웃 (10초)
-constexpr uint16_t HSMS_PORT      = 5000U;
+constexpr uint16_t HSMS_PORT      = 5001U;
 
 static uint64_t nowMs() {
     auto t = std::chrono::steady_clock::now().time_since_epoch();

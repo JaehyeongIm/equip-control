@@ -180,3 +180,14 @@ osMessageQueueId_t uart_get_rx_queue(void)
 {
     return s_rxByteQueue;
 }
+
+/* PA3(RX) 플로팅 등으로 프레이밍 에러 발생 시 RX IT 자동 복구 */
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART2) {
+        __HAL_UART_CLEAR_OREFLAG(huart);
+        __HAL_UART_CLEAR_FEFLAG(huart);
+        __HAL_UART_CLEAR_NEFLAG(huart);
+        HAL_UART_Receive_IT(huart, &s_rxByte, 1U);
+    }
+}
