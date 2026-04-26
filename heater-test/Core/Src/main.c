@@ -23,6 +23,7 @@
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
 #include <string.h>
+#include "dht22.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -99,6 +100,7 @@ int main(void)
   MX_I2C1_Init();
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
+  DHT22_Init();
   HAL_Delay(3000);
 
   /* 초기 상태: 히터 OFF, 팬 OFF */
@@ -132,7 +134,20 @@ int main(void)
 
     snprintf(buf, sizeof(buf), "[S4] Heater OFF         Fan OFF\r\n");
     HAL_UART_Transmit(&huart2, (uint8_t *)buf, strlen(buf), 100);
-    HAL_Delay(3000);
+
+    /* DHT22 측정 (OFF 구간에서 읽기, 센서 최소 2초 간격) */
+    HAL_Delay(2000);
+    DHT22_Data dht = {0};
+    if (DHT22_Read(&dht) == DHT22_OK) {
+        int t = (int)(dht.temperature * 10.0f);
+        int h = (int)(dht.humidity * 10.0f);
+        snprintf(buf, sizeof(buf), "[DHT22] %d.%dC  %d.%d%%RH\r\n",
+                 t / 10, t % 10, h / 10, h % 10);
+    } else {
+        snprintf(buf, sizeof(buf), "[DHT22] ERROR\r\n");
+    }
+    HAL_UART_Transmit(&huart2, (uint8_t *)buf, strlen(buf), 100);
+    HAL_Delay(1000);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -324,6 +339,9 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, FAN_RELAY_Pin|LD2_Pin, GPIO_PIN_RESET);
 
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(DHT22_DATA_GPIO_Port, DHT22_DATA_Pin, GPIO_PIN_RESET);
+
   /*Configure GPIO pin : B1_Pin */
   GPIO_InitStruct.Pin = B1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
@@ -336,6 +354,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : DHT22_DATA_Pin */
+  GPIO_InitStruct.Pin = DHT22_DATA_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(DHT22_DATA_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
