@@ -119,10 +119,19 @@ STATUS      # 즉시 DATA 응답 요청
 
 ```bash
 cd chamber-ec
-pip install -r requirements.txt
-python3 ec.py /dev/tty.usbmodem*
-```
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python ec.py /dev/cu.usbmodem*
 
+
+```
+## 2-1 단계 재접속 시 가상 환경 활성화
+```bash
+source .venv/bin/activate
+python ec.py /dev/cu.usbmodem*
+```
 ### EC 명령어
 
 | 명령 | 설명 |

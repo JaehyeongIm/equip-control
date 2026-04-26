@@ -51,6 +51,19 @@ typedef enum {
 #define HB_TX_MS          5000U
 #define RX_BUF_SIZE       64
 #define BUZZER_TOGGLE_MS  500U
+
+/* Fixed-duty heat-up test mode.
+ * TEST_FIXED_DUTY_ENABLE=1: PID 대신 히터를 50% duty로 고정하고,
+ * 목표온도 최초 도달 후에는 히터를 latch-off 한다.
+ * TEST_FIXED_DUTY_ENABLE=0: 기존 PID 제어로 복귀.
+ */
+#define TEST_FIXED_DUTY_ENABLE  1
+#define TEST_FIXED_DUTY_CMP     500U   /* 0~1000 == 0.0~100.0%, 500 == 50.0% */
+#define STOP_HEATER_AT_TARGET   1
+
+/* Relay polarity. If your relay module is Active-Low, swap these two definitions. */
+#define FAN_ON            GPIO_PIN_SET
+#define FAN_OFF           GPIO_PIN_RESET
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -95,11 +108,24 @@ static char             g_rx_buf[RX_BUF_SIZE];
 static uint8_t          g_rx_idx  = 0;
 static volatile uint8_t g_line_ready = 0;
 static char             g_line[RX_BUF_SIZE];
-
+static uint32_t g_heater_cmp = 0;   // 0~1000, 즉 0.0%~100.0%
 static uint32_t g_buzz_tick  = 0;
 static uint8_t  g_buzz_state = 0;
 static uint32_t g_led_tick   = 0;
 static uint8_t  g_led_state  = 0;
+
+/* Run-time KPI tracking: START accepted time, target reach time */
+static uint8_t  g_run_active     = 0;
+static uint32_t g_run_start_tick = 0;
+static uint8_t  g_target_reached = 0;
+static uint32_t g_reach_ms       = 0;
+
+/* Overshoot KPI tracking
+ * Definition: overshoot = max temperature after first target reach - setpoint.
+ * Unit sent to EC: 0.1°C resolution.
+ */
+static float g_peak_temp_after_reach = 0.0f;
+static float g_overshoot_c           = 0.0f;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -149,6 +175,7 @@ static void uart_tx(const char *str)
 
 static void heater_off(void)
 {
+    g_heater_cmp = 0;
     __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, 0);
     HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_3);
     g_integral = 0.0f;
@@ -157,8 +184,14 @@ static void heater_off(void)
 
 static void heater_set(uint32_t cmp)
 {
-    if (cmp == 0) { heater_off(); return; }
     if (cmp > 1000) cmp = 1000;
+    g_heater_cmp = cmp;
+
+    if (cmp == 0) { 
+        heater_off(); 
+        return; 
+    }
+
     __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, cmp);
     HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);
 }
@@ -192,14 +225,67 @@ static const char *state_str(void)
     }
 }
 
+static int32_t to_x10(float v)
+{
+    if (v >= 0.0f)
+        return (int32_t)(v * 10.0f + 0.5f);
+    else
+        return (int32_t)(v * 10.0f - 0.5f);
+}
+
 static void send_data(void)
 {
-    char buf[96];
+    char buf[176];
+
     const char *alm = (g_state == STATE_WARNING) ? "ALM-01"
                     : (g_state == STATE_ALARM)   ? g_alm_id
                     : "NONE";
-    snprintf(buf, sizeof(buf), "DATA:%.1f,%.1f,%s,%s\r\n",
-             g_temp, g_sp, state_str(), alm);
+
+    int32_t temp10 = to_x10(g_temp);
+    int32_t sp10   = to_x10(g_sp);
+
+    /* g_heater_cmp: 0~1000 == 0.0~100.0% */
+    uint32_t duty10 = g_heater_cmp;
+
+    /* elapsed/reach are reported in 0.1 s resolution */
+    uint32_t elapsed10 = 0;
+    if (g_run_active) {
+        elapsed10 = (HAL_GetTick() - g_run_start_tick) / 100U;
+    }
+
+    uint32_t reach10 = g_reach_ms / 100U;
+
+    /* Overshoot KPI: valid after target_reached == 1 */
+    int32_t peak10      = to_x10(g_peak_temp_after_reach);
+    int32_t overshoot10 = to_x10(g_overshoot_c);
+
+    snprintf(buf, sizeof(buf),
+             "DATA:%ld.%01ld,%ld.%01ld,%s,%s,%lu.%01lu,%lu.%01lu,%u,%lu.%01lu,%ld.%01ld,%ld.%01ld\r\n",
+             temp10 / 10, labs(temp10 % 10),
+             sp10 / 10,   labs(sp10 % 10),
+             state_str(), alm,
+
+             /* duty_pct */
+             (unsigned long)(duty10 / 10U),
+             (unsigned long)(duty10 % 10U),
+
+             /* elapsed_s */
+             (unsigned long)(elapsed10 / 10U),
+             (unsigned long)(elapsed10 % 10U),
+
+             /* target_reached */
+             (unsigned int)g_target_reached,
+
+             /* reach_s */
+             (unsigned long)(reach10 / 10U),
+             (unsigned long)(reach10 % 10U),
+
+             /* peak_temp_after_reach_c */
+             peak10 / 10, labs(peak10 % 10),
+
+             /* overshoot_c */
+             overshoot10 / 10, labs(overshoot10 % 10));
+
     uart_tx(buf);
 }
 
@@ -212,7 +298,7 @@ static void enter_alarm(const char *alm_id)
     g_alm_id[sizeof(g_alm_id) - 1] = '\0';
 
     heater_off();
-    HAL_GPIO_WritePin(FAN_RELAY_GPIO_Port, FAN_RELAY_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(FAN_RELAY_GPIO_Port, FAN_RELAY_Pin, FAN_ON);
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
     g_buzz_state = 1;
 
@@ -238,6 +324,28 @@ static void handle_cmd(char *line)
             g_in_warn_tmr  = 0;
             g_in_alarm_tmr = 0;
             g_last_pid_tick = HAL_GetTick();
+
+            strncpy(g_alm_id, "NONE", sizeof(g_alm_id));
+            g_run_active     = 1;
+            g_run_start_tick = g_last_pid_tick;
+            g_target_reached = 0;
+            g_reach_ms       = 0;
+            g_peak_temp_after_reach = 0.0f;
+            g_overshoot_c           = 0.0f;
+
+            HAL_GPIO_WritePin(FAN_RELAY_GPIO_Port, FAN_RELAY_Pin, FAN_ON);
+
+#if TEST_FIXED_DUTY_ENABLE
+            /* 50% fixed-duty test: START 직후 히터를 바로 50%로 켠다.
+             * 단, 현재 온도가 이미 목표온도 이상이면 켜지 않는다.
+             */
+            if (!g_temp_valid || g_temp < g_sp) {
+                heater_set(TEST_FIXED_DUTY_CMP);
+            } else {
+                heater_off();
+            }
+#endif
+
             uart_tx("ACK:START\r\n");
         }
 
@@ -246,11 +354,17 @@ static void handle_cmd(char *line)
             uart_tx("EVENT:CLEAR,ALM-01\r\n");
         g_state = STATE_IDLE;
         heater_off();
-        HAL_GPIO_WritePin(FAN_RELAY_GPIO_Port, FAN_RELAY_Pin, GPIO_PIN_RESET);
+        
+        HAL_GPIO_WritePin(FAN_RELAY_GPIO_Port, FAN_RELAY_Pin, FAN_OFF);
         HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
         g_buzz_state   = 0;
         g_in_warn_tmr  = 0;
         g_in_alarm_tmr = 0;
+        g_run_active     = 0;
+        g_target_reached = 0;
+        g_reach_ms       = 0;
+        g_peak_temp_after_reach = 0.0f;
+        g_overshoot_c           = 0.0f;
         uart_tx("ACK:STOP\r\n");
 
     } else if (strcmp(line, "RESET") == 0) {
@@ -264,11 +378,16 @@ static void handle_cmd(char *line)
             strncpy(g_alm_id, "NONE", sizeof(g_alm_id));
             g_state = STATE_IDLE;
             heater_off();
-            HAL_GPIO_WritePin(FAN_RELAY_GPIO_Port, FAN_RELAY_Pin, GPIO_PIN_RESET);
+            HAL_GPIO_WritePin(FAN_RELAY_GPIO_Port, FAN_RELAY_Pin, FAN_OFF);
             HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
             g_buzz_state   = 0;
             g_in_warn_tmr  = 0;
             g_in_alarm_tmr = 0;
+            g_run_active     = 0;
+            g_target_reached = 0;
+            g_reach_ms       = 0;
+            g_peak_temp_after_reach = 0.0f;
+            g_overshoot_c           = 0.0f;
             uart_tx("ACK:RESET\r\n");
         }
 
@@ -277,7 +396,8 @@ static void handle_cmd(char *line)
         if (new_sp >= 20.0f && new_sp <= 80.0f) {
             g_sp = new_sp;
             char buf[32];
-            snprintf(buf, sizeof(buf), "ACK:SET:%.1f\r\n", g_sp);
+            int32_t sp10 = to_x10(g_sp);
+            snprintf(buf, sizeof(buf), "ACK:SET:%ld.%01ld\r\n", sp10 / 10, labs(sp10 % 10));
             uart_tx(buf);
         } else {
             uart_tx("NACK:SET,OUT_OF_RANGE\r\n");
@@ -327,7 +447,7 @@ int main(void)
   HAL_Delay(500);
 
   heater_off();
-  HAL_GPIO_WritePin(FAN_RELAY_GPIO_Port, FAN_RELAY_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(FAN_RELAY_GPIO_Port, FAN_RELAY_Pin, FAN_OFF);
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
 
@@ -375,12 +495,68 @@ int main(void)
         }
     }
 
-    /* 3. PID update on new valid reading */
+    /* 3. Heater control + KPI update on new valid reading */
     if (new_reading && (g_state == STATE_HEATING || g_state == STATE_WARNING)) {
         uint32_t dt = now - g_last_pid_tick;
         if (dt == 0) dt = DHT_INTERVAL_MS;
         g_last_pid_tick = now;
+
+        /* KPI: first target reach time from accepted START moment */
+        if (g_run_active && !g_target_reached && g_temp_valid && g_temp >= g_sp) {
+            g_target_reached = 1;
+            g_reach_ms = now - g_run_start_tick;
+
+            /* Initialize overshoot tracking from the first target-reached sample. */
+            g_peak_temp_after_reach = g_temp;
+            g_overshoot_c = g_peak_temp_after_reach - g_sp;
+            if (g_overshoot_c < 0.0f) g_overshoot_c = 0.0f;
+
+            char reach_buf[96];
+            int32_t temp10 = to_x10(g_temp);
+            int32_t sp10   = to_x10(g_sp);
+            int32_t overshoot10 = to_x10(g_overshoot_c);
+            snprintf(reach_buf, sizeof(reach_buf),
+                     "EVENT:TARGET_REACHED,%lu.%01lu,%ld.%01ld,%ld.%01ld,%ld.%01ld\r\n",
+                     (unsigned long)(g_reach_ms / 1000U),
+                     (unsigned long)((g_reach_ms % 1000U) / 100U),
+                     temp10 / 10, labs(temp10 % 10),
+                     sp10 / 10,   labs(sp10 % 10),
+                     overshoot10 / 10, labs(overshoot10 % 10));
+            uart_tx(reach_buf);
+        }
+
+        /* KPI: overshoot = highest temperature after target reach - setpoint. */
+        if (g_run_active && g_target_reached && g_temp_valid) {
+            if (g_temp > g_peak_temp_after_reach) {
+                g_peak_temp_after_reach = g_temp;
+            }
+
+            g_overshoot_c = g_peak_temp_after_reach - g_sp;
+            if (g_overshoot_c < 0.0f) g_overshoot_c = 0.0f;
+        }
+
+#if TEST_FIXED_DUTY_ENABLE
+        /* Fixed-duty heat-up test:
+         * - 목표온도 도달 전: 히터 duty 50% 고정
+         * - 목표온도 최초 도달 후: 히터 OFF 유지(latch-off)
+         * 이 방식은 PID 성능이 아니라 50% 출력 조건에서의 도달시간/오버슈트 측정용이다.
+         */
+#if STOP_HEATER_AT_TARGET
+        if (g_target_reached || g_temp >= g_sp) {
+            heater_off();
+        } else {
+            heater_set(TEST_FIXED_DUTY_CMP);
+        }
+#else
+        if (g_temp < g_sp) {
+            heater_set(TEST_FIXED_DUTY_CMP);
+        } else {
+            heater_off();
+        }
+#endif
+#else
         heater_set(pid_update(g_temp, g_sp, dt));
+#endif
     }
 
     /* 4. Alarm tier logic */
@@ -601,6 +777,7 @@ static void MX_TIM3_Init(void)
   HAL_TIM_MspPostInit(&htim3);
 
 }
+
 
 /**
   * @brief USART2 Initialization Function

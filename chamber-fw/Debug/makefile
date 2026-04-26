@@ -60,8 +60,8 @@ all: main-build
 main-build: heater-test.elf secondary-outputs
 
 # Tool invocations
-heater-test.elf heater-test.map: $(OBJS) $(USER_OBJS) /Users/posin/projects/equip-control/heater-test/STM32F446RETX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "heater-test.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"/Users/posin/projects/equip-control/heater-test/STM32F446RETX_FLASH.ld" --specs=nosys.specs -Wl,-Map="heater-test.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+heater-test.elf heater-test.map: $(OBJS) $(USER_OBJS) /Users/posin/projects/equip-control/chamber-fw/STM32F446RETX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "heater-test.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"/Users/posin/projects/equip-control/chamber-fw/STM32F446RETX_FLASH.ld" --specs=nosys.specs -Wl,-Map="heater-test.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 
