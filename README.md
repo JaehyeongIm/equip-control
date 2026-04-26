@@ -10,7 +10,7 @@
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│  EC (Equipment Controller, macOS C++)                │
+│  EC (Equipment Controller, macOS Python)             │
 │                                                      │
 │  - SET SP / START / STOP / RESET 명령               │
 │  - 온도 트렌드 실시간 모니터링                       │
@@ -22,11 +22,10 @@
 ┌─────────────────────▼────────────────────────────────┐
 │  FW (STM32F446RE NUCLEO, C)                          │
 │                                                      │
-│  - DS18B20 온도 측정 (OneWire, 750ms)               │
+│  - DHT22 온도 측정 (단선, PB5/D4, 2s 주기)          │
 │  - PID 히터 PWM 제어 (TIM3_CH3, 1kHz)              │
 │  - 팬 릴레이 제어 (PA0)                             │
 │  - 부저 제어 (PB10, WARNING/ALARM 경보)             │
-│  - 도어 스위치 감지 (PA1, 페일세이프)               │
 │  - WARNING / ALARM 판정 및 EC 보고                  │
 └──────────────────────────────────────────────────────┘
 ```
@@ -38,11 +37,11 @@
 ```
 HEATING (PID 제어 중)
   │
-  │ DS18B20 > SP + 3°C, 5초 지속
+  │ 온도 > SP + 3°C, 5초 지속
   ▼
 WARNING (ALM-01) — 부저 간헐, EC 경고, PID 유지
   │
-  │ DS18B20 > SP + 5°C, 10초 지속
+  │ 온도 > SP + 5°C, 10초 지속
   ▼
 ALARM (ALM-02) — 히터 OFF, 팬 ON, 부저 연속
   │              EC 진단 패널 활성화
@@ -58,11 +57,9 @@ IDLE — 정상 복귀
 
 | ALID | 알람명 | 발생 조건 | FW 자동 대응 | 복구 |
 |------|--------|---------|------------|------|
-| ALM-01 | TEMP_WARNING | DS18B20 > SP + 3°C, 5초 지속 | 부저 간헐, EC WARNING 보고 | 온도 복귀 시 자동 해제 |
-| ALM-02 | TEMP_ALARM | DS18B20 > SP + 5°C, 10초 지속 | 히터 OFF, 팬 ON, 부저 연속 | EC RESET (수동) |
-| ALM-03 | SENSOR_ERROR | DS18B20 3회 연속 읽기 실패 | 히터 OFF, 부저 ON | 센서 복구 후 EC RESET |
-| ALM-04 | COMM_ERROR | Heartbeat 10초 미수신 | FW 히터 OFF (안전 모드) | EC 재연결 후 자동 해제 |
-| ALM-05 | DOOR_OPEN | 도어 스위치 PA1 HIGH | 히터 OFF, EC 경고 | 도어 닫힘 시 자동 해제 |
+| ALM-01 | TEMP_WARNING | 온도 > SP + 3°C, 5초 지속 | 부저 간헐, EC WARNING 보고 | 온도 복귀 시 자동 해제 |
+| ALM-02 | TEMP_ALARM | 온도 > SP + 5°C, 10초 지속 | 히터 OFF, 팬 ON, 부저 연속 | EC RESET (수동) |
+| ALM-03 | SENSOR_ERROR | DHT22 3회 연속 읽기 실패 | 히터 OFF, 부저 ON | 센서 복구 후 EC RESET |
 
 ---
 
@@ -71,13 +68,12 @@ IDLE — 정상 복귀
 | 부품 | 역할 | 인터페이스 |
 |------|------|-----------|
 | STM32 NUCLEO-F446RE | 메인 MCU (180MHz) | — |
-| DS18B20 | 챔버 온도 측정 (±0.5°C, 12-bit) | OneWire (PB5/D4) |
+| DHT22 | 챔버 온도 측정 (±0.5°C) | 단선 (PB5/D4) |
 | 카프톤 필름 히터 24V/~26W | 챔버 가열 | — |
 | N-ch MOSFET 모듈 | 히터 PWM 제어 (1kHz) | PB0/A3 (TIM3_CH3) |
 | 릴레이 모듈 + 5V 팬 | 강제 냉각 | PA0/A0 |
 | DC-DC 컨버터 (24V→5V) | 팬 전원 | — |
 | 액티브 부저 (3.3V) | 알람 경보 | PB10/D6 |
-| 도어 리미트 스위치 (NO) | 도어 감지 (페일세이프) | PA1/A1 |
 | WANPTEK 파워 서플라이 | 24V / 1.5A 제한 | — |
 | 밀폐 용기 (~1L) | 소형 챔버 | — |
 
@@ -115,16 +111,16 @@ STATUS      # 즉시 DATA 응답 요청
 
 ```
 1. STM32CubeIDE 실행
-2. equip-control-fw 프로젝트 임포트
+2. heater-test 프로젝트 임포트
 3. Run (▶) — 빌드 → Flash → 실행
 ```
 
-### 2단계 — EC 빌드 및 실행
+### 2단계 — EC 실행
 
 ```bash
-cd equip-control-ec
-cmake -B build && cmake --build build
-./build/ec /dev/tty.usbmodem*
+cd chamber-ec
+pip install -r requirements.txt
+python3 ec.py /dev/tty.usbmodem*
 ```
 
 ### EC 명령어
@@ -144,13 +140,13 @@ cmake -B build && cmake --build build
 
 ```
 equip-control/
-├── equip-control-fw/           # STM32 펌웨어 (C, HAL)
+├── chamber-fw/                 # STM32 펌웨어 (C, HAL)
 │   └── Core/Src/
 │       ├── main.c
-│       ├── ds18b20.c           # OneWire 온도 센서 드라이버
-│       └── uart_comm.c         # EC 통신 처리
-├── equip-control-ec/           # EC 소프트웨어 (C++, CMake)
-├── heater-test/                # 단계별 하드웨어 테스트 (개발용)
+│       └── dht22.c             # DHT22 온도 센서 드라이버
+├── chamber-ec/                 # EC 소프트웨어 (Python)
+│   ├── ec.py
+│   └── requirements.txt
 └── docs/
     ├── hw/                     # 설계 및 운영 문서
     │   ├── EFS-001.md          # Equipment Functional Specification
@@ -169,8 +165,8 @@ equip-control/
 | 문서 | 내용 |
 |------|------|
 | [EFS-001](docs/hw/EFS-001.md) | 장비 기능 명세 (상태 머신, 알람 동작, UART 프로토콜, EC 진단 패널) |
-| [AIM-001](docs/hw/AIM-001.md) | 알람 매트릭스 (ALM-01~05 발생 조건, 자동 대응, 복구 조건) |
+| [AIM-001](docs/hw/AIM-001.md) | 알람 매트릭스 (ALM-01~03 발생 조건, 자동 대응, 복구 조건) |
 | [TRG-001](docs/hw/TRG-001.md) | 현장 대응 절차서 (원인 진단 트리, 단계별 조치, 복구 검증) |
-| [HDS-001](docs/hw/HDS-001.md) | HW 설계 명세 (DS18B20, MOSFET PWM 회로, 전원 아키텍처) |
+| [HDS-001](docs/hw/HDS-001.md) | HW 설계 명세 (DHT22, MOSFET PWM 회로, 전원 아키텍처) |
 | [IO-001](docs/hw/IO-001.md) | I/O 목록 및 배선도 (전체 핀 매핑, 배선 구성) |
-| [TPV-001](docs/hw/TPV-001.md) | 테스트 계획 및 검증 결과 기록 (TC-01~07) |
+| [TPV-001](docs/hw/TPV-001.md) | 테스트 계획 및 검증 결과 기록 (TC-01~05) |

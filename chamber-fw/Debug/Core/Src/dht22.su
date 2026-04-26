@@ -1,0 +1,5 @@
+../Core/Src/dht22.c:6:13:delay_us	24	static
+../Core/Src/dht22.c:13:13:pin_output	32	static
+../Core/Src/dht22.c:23:13:pin_input	32	static
+../Core/Src/dht22.c:32:6:DHT22_Init	4	static
+../Core/Src/dht22.c:40:14:DHT22_Read	40	static
