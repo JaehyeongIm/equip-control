@@ -40,24 +40,25 @@ typedef enum {
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define SP_DEFAULT        30.0f
-#define WARN_THR          3.0f    /* SP+3°C → WARNING */
-#define ALARM_THR         5.0f    /* SP+5°C → ALARM */
+#define WARN_THR          1.0f    /* SP+1°C → WARNING */
+#define ALARM_THR         2.0f    /* SP+2°C → ALARM */
 #define WARN_DUR_MS       5000U
 #define ALARM_DUR_MS      10000U
 #define RESET_THR         2.0f    /* 온도 ≤ SP-2°C 시 RESET 허용 */
 #define SENSOR_FAIL_MAX   3
 #define DHT_INTERVAL_MS   2000U
 #define DATA_TX_MS        1000U
-#define HB_TX_MS          5000U
 #define RX_BUF_SIZE       64
-#define BUZZER_TOGGLE_MS  500U
+#define BUZZER_TOGGLE_MS  1000U
+#define SETTLE_BAND_C     1.0f   /* ±1°C settling band around SP */
+#define SETTLE_COUNT      5U     /* consecutive readings within band → settled */
 
 /* Fixed-duty heat-up test mode.
  * TEST_FIXED_DUTY_ENABLE=1: PID 대신 히터를 50% duty로 고정하고,
  * 목표온도 최초 도달 후에는 히터를 latch-off 한다.
  * TEST_FIXED_DUTY_ENABLE=0: 기존 PID 제어로 복귀.
  */
-#define TEST_FIXED_DUTY_ENABLE  1
+#define TEST_FIXED_DUTY_ENABLE  0
 #define TEST_FIXED_DUTY_CMP     500U   /* 0~1000 == 0.0~100.0%, 500 == 50.0% */
 #define STOP_HEATER_AT_TARGET   1
 
@@ -83,9 +84,9 @@ static EquipState g_state     = STATE_IDLE;
 static char       g_alm_id[8] = "NONE";
 
 static float    g_sp       = SP_DEFAULT;
-static float    g_kp       = 25.0f;
-static float    g_ki       = 0.3f;
-static float    g_kd       = 3.0f;
+static float    g_kp       = 200.0f;
+static float    g_ki       = 2.0f;
+static float    g_kd       = 0.0f;
 static float    g_integral = 0.0f;
 static float    g_prev_err = 0.0f;
 static uint32_t g_last_pid_tick = 0;
@@ -101,7 +102,6 @@ static uint8_t  g_in_warn_tmr  = 0;
 static uint8_t  g_in_alarm_tmr = 0;
 
 static uint32_t g_last_data_tx = 0;
-static uint32_t g_last_hb_tx   = 0;
 
 static uint8_t          g_rx_byte = 0;
 static char             g_rx_buf[RX_BUF_SIZE];
@@ -126,6 +126,10 @@ static uint32_t g_reach_ms       = 0;
  */
 static float g_peak_temp_after_reach = 0.0f;
 static float g_overshoot_c           = 0.0f;
+
+static uint8_t  g_settled       = 0;
+static uint32_t g_settle_ms     = 0;
+static uint8_t  g_in_band_count = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -235,7 +239,7 @@ static int32_t to_x10(float v)
 
 static void send_data(void)
 {
-    char buf[176];
+    char buf[192];
 
     const char *alm = (g_state == STATE_WARNING) ? "ALM-01"
                     : (g_state == STATE_ALARM)   ? g_alm_id
@@ -258,9 +262,10 @@ static void send_data(void)
     /* Overshoot KPI: valid after target_reached == 1 */
     int32_t peak10      = to_x10(g_peak_temp_after_reach);
     int32_t overshoot10 = to_x10(g_overshoot_c);
+    uint32_t settle10   = g_settle_ms / 100U;
 
     snprintf(buf, sizeof(buf),
-             "DATA:%ld.%01ld,%ld.%01ld,%s,%s,%lu.%01lu,%lu.%01lu,%u,%lu.%01lu,%ld.%01ld,%ld.%01ld\r\n",
+             "DATA:%ld.%01ld,%ld.%01ld,%s,%s,%lu.%01lu,%lu.%01lu,%u,%lu.%01lu,%ld.%01ld,%ld.%01ld,%u,%lu.%01lu\r\n",
              temp10 / 10, labs(temp10 % 10),
              sp10 / 10,   labs(sp10 % 10),
              state_str(), alm,
@@ -284,7 +289,14 @@ static void send_data(void)
              peak10 / 10, labs(peak10 % 10),
 
              /* overshoot_c */
-             overshoot10 / 10, labs(overshoot10 % 10));
+             overshoot10 / 10, labs(overshoot10 % 10),
+
+             /* settled */
+             (unsigned int)g_settled,
+
+             /* settle_s */
+             (unsigned long)(settle10 / 10U),
+             (unsigned long)(settle10 % 10U));
 
     uart_tx(buf);
 }
@@ -299,7 +311,7 @@ static void enter_alarm(const char *alm_id)
 
     heater_off();
     HAL_GPIO_WritePin(FAN_RELAY_GPIO_Port, FAN_RELAY_Pin, FAN_ON);
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(Buzzer_GPIO_Port, Buzzer_Pin, GPIO_PIN_SET);
     g_buzz_state = 1;
 
     char buf[32];
@@ -332,8 +344,9 @@ static void handle_cmd(char *line)
             g_reach_ms       = 0;
             g_peak_temp_after_reach = 0.0f;
             g_overshoot_c           = 0.0f;
-
-            HAL_GPIO_WritePin(FAN_RELAY_GPIO_Port, FAN_RELAY_Pin, FAN_ON);
+            g_settled       = 0;
+            g_settle_ms     = 0;
+            g_in_band_count = 0;
 
 #if TEST_FIXED_DUTY_ENABLE
             /* 50% fixed-duty test: START 직후 히터를 바로 50%로 켠다.
@@ -356,7 +369,7 @@ static void handle_cmd(char *line)
         heater_off();
         
         HAL_GPIO_WritePin(FAN_RELAY_GPIO_Port, FAN_RELAY_Pin, FAN_OFF);
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(Buzzer_GPIO_Port, Buzzer_Pin, GPIO_PIN_RESET);
         g_buzz_state   = 0;
         g_in_warn_tmr  = 0;
         g_in_alarm_tmr = 0;
@@ -365,6 +378,9 @@ static void handle_cmd(char *line)
         g_reach_ms       = 0;
         g_peak_temp_after_reach = 0.0f;
         g_overshoot_c           = 0.0f;
+        g_settled       = 0;
+        g_settle_ms     = 0;
+        g_in_band_count = 0;
         uart_tx("ACK:STOP\r\n");
 
     } else if (strcmp(line, "RESET") == 0) {
@@ -379,7 +395,7 @@ static void handle_cmd(char *line)
             g_state = STATE_IDLE;
             heater_off();
             HAL_GPIO_WritePin(FAN_RELAY_GPIO_Port, FAN_RELAY_Pin, FAN_OFF);
-            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
+            HAL_GPIO_WritePin(Buzzer_GPIO_Port, Buzzer_Pin, GPIO_PIN_RESET);
             g_buzz_state   = 0;
             g_in_warn_tmr  = 0;
             g_in_alarm_tmr = 0;
@@ -388,6 +404,9 @@ static void handle_cmd(char *line)
             g_reach_ms       = 0;
             g_peak_temp_after_reach = 0.0f;
             g_overshoot_c           = 0.0f;
+            g_settled       = 0;
+            g_settle_ms     = 0;
+            g_in_band_count = 0;
             uart_tx("ACK:RESET\r\n");
         }
 
@@ -448,13 +467,12 @@ int main(void)
 
   heater_off();
   HAL_GPIO_WritePin(FAN_RELAY_GPIO_Port, FAN_RELAY_Pin, FAN_OFF);
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(Buzzer_GPIO_Port, Buzzer_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
 
   uint32_t boot_now = HAL_GetTick();
   g_last_dht_tick = boot_now;
   g_last_data_tx  = boot_now;
-  g_last_hb_tx    = boot_now;
   g_last_pid_tick = boot_now;
 
   HAL_UART_Receive_IT(&huart2, &g_rx_byte, 1);
@@ -535,6 +553,26 @@ int main(void)
             if (g_overshoot_c < 0.0f) g_overshoot_c = 0.0f;
         }
 
+        /* KPI: settling time — SETTLE_COUNT consecutive readings within SP ± SETTLE_BAND_C */
+        if (g_run_active && !g_settled && g_temp_valid) {
+            float err_abs = g_temp - g_sp;
+            if (err_abs < 0.0f) err_abs = -err_abs;
+            if (err_abs <= SETTLE_BAND_C) {
+                g_in_band_count++;
+                if (g_in_band_count >= SETTLE_COUNT) {
+                    g_settled   = 1;
+                    g_settle_ms = now - g_run_start_tick;
+                    char sbuf[48];
+                    snprintf(sbuf, sizeof(sbuf), "EVENT:SETTLED,%lu.%01lu\r\n",
+                             (unsigned long)(g_settle_ms / 1000U),
+                             (unsigned long)((g_settle_ms % 1000U) / 100U));
+                    uart_tx(sbuf);
+                }
+            } else {
+                g_in_band_count = 0;
+            }
+        }
+
 #if TEST_FIXED_DUTY_ENABLE
         /* Fixed-duty heat-up test:
          * - 목표온도 도달 전: 히터 duty 50% 고정
@@ -569,6 +607,8 @@ int main(void)
 
             if (g_state == STATE_HEATING && (now - g_warn_start) >= WARN_DUR_MS) {
                 g_state = STATE_WARNING;
+                g_integral = 0.0f;
+                HAL_GPIO_WritePin(FAN_RELAY_GPIO_Port, FAN_RELAY_Pin, FAN_ON);
                 uart_tx("EVENT:WARN,ALM-01\r\n");
             }
             if ((now - g_alarm_start) >= ALARM_DUR_MS) {
@@ -583,6 +623,8 @@ int main(void)
 
             if (g_state == STATE_HEATING && (now - g_warn_start) >= WARN_DUR_MS) {
                 g_state = STATE_WARNING;
+                g_integral = 0.0f;
+                HAL_GPIO_WritePin(FAN_RELAY_GPIO_Port, FAN_RELAY_Pin, FAN_ON);
                 uart_tx("EVENT:WARN,ALM-01\r\n");
             }
 
@@ -591,6 +633,8 @@ int main(void)
             g_in_alarm_tmr = 0;
             if (g_state == STATE_WARNING) {
                 g_state = STATE_HEATING;
+                g_integral = 0.0f;
+                HAL_GPIO_WritePin(FAN_RELAY_GPIO_Port, FAN_RELAY_Pin, FAN_OFF);
                 uart_tx("EVENT:CLEAR,ALM-01\r\n");
             }
         }
@@ -598,17 +642,17 @@ int main(void)
 
     /* 5. Buzzer: ALARM=연속, WARNING=500ms 토글, else=OFF */
     if (g_state == STATE_ALARM) {
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(Buzzer_GPIO_Port, Buzzer_Pin, GPIO_PIN_SET);
         g_buzz_state = 1;
     } else if (g_state == STATE_WARNING) {
         if ((now - g_buzz_tick) >= BUZZER_TOGGLE_MS) {
             g_buzz_tick  = now;
             g_buzz_state = !g_buzz_state;
-            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10,
+            HAL_GPIO_WritePin(Buzzer_GPIO_Port, Buzzer_Pin,
                               g_buzz_state ? GPIO_PIN_SET : GPIO_PIN_RESET);
         }
     } else if (g_buzz_state) {
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(Buzzer_GPIO_Port, Buzzer_Pin, GPIO_PIN_RESET);
         g_buzz_state = 0;
     }
 
@@ -633,12 +677,6 @@ int main(void)
     if ((now - g_last_data_tx) >= DATA_TX_MS) {
         g_last_data_tx = now;
         send_data();
-    }
-
-    /* 8. HB TX 5s 주기 */
-    if ((now - g_last_hb_tx) >= HB_TX_MS) {
-        g_last_hb_tx = now;
-        uart_tx("HB\r\n");
     }
 
     /* USER CODE END WHILE */
@@ -778,7 +816,6 @@ static void MX_TIM3_Init(void)
 
 }
 
-
 /**
   * @brief USART2 Initialization Function
   * @param None
@@ -834,7 +871,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOA, FAN_RELAY_Pin|LD2_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(DHT22_DATA_GPIO_Port, DHT22_DATA_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, Buzzer_Pin|DHT22_DATA_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : B1_Pin */
   GPIO_InitStruct.Pin = B1_Pin;
@@ -849,22 +886,14 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : DHT22_DATA_Pin */
-  GPIO_InitStruct.Pin = DHT22_DATA_Pin;
+  /*Configure GPIO pins : Buzzer_Pin DHT22_DATA_Pin */
+  GPIO_InitStruct.Pin = Buzzer_Pin|DHT22_DATA_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(DHT22_DATA_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
-
-  /* BUZZER: PB10 / D6 */
-  GPIO_InitStruct.Pin   = GPIO_PIN_10;
-  GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull  = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
 
   /* USER CODE END MX_GPIO_Init_2 */
 }
