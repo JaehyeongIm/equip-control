@@ -3,3 +3,5 @@
 
 # Claude Code
 .claude/
+chamber-fw/Debug/
+chamber-ec/logs/
