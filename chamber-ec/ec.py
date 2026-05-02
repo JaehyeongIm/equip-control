@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Equipment Controller (EC) — 히터 과온 알람 진단 및 안전 복구 시스템
+Equipment Controller (EC) — 챔버 과온 알람 진단 및 안전 복구 시스템
 Usage: python3 ec.py <serial_port>
   예)  python3 ec.py /dev/tty.usbmodem*
 
@@ -367,7 +367,7 @@ def _ui(stdscr, ser):
             sc = curses.color_pair(5)
 
         row = 0
-        hdr = " 히터 과온 알람 진단 및 안전 복구 시스템 "
+        hdr = " 챔버 과온 알람 진단 및 안전 복구 시스템 "
         _safe_addstr(stdscr, row, 0, hdr.center(w), curses.color_pair(4) | curses.A_BOLD)
         row += 1
         _safe_addstr(stdscr, row, 0, "─" * (w - 1), curses.color_pair(4))
