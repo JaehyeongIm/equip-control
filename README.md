@@ -1,36 +1,17 @@
 # 챔버 과온 알람 진단 및 안전 복구 시스템
 
-락앤락 밀폐 용기로 제작한 소형 챔버 내부 온도를 제어하며 **과온 알람 원인을 진단하고 안전하게 복구**하는 시스템입니다.
+STM32F446RE에 FreeRTOS를 올려 챔버 온도를 PI 제어하고, 과온 발생 시 안전 차단·복구까지 수행하는 임베디드 시스템입니다. PC측 Equipment Controller(EC)와 UART로 연결해 실시간 모니터링과 명령 처리를 합니다.
 
-과온이 발생하면 시스템이 자동으로 히터를 차단하고 챔버 환기 냉각을 시작합니다. 이후 운전이력 로그와 현장 계측을 통해 원인(센서 이상·팬 불량·환경 온도·제어값 과다·차단 회로 불량)을 좁혀 조치하고, 복구 조건이 충족되면 재가동합니다.
+## 기술 스택
 
----
-
-## 과온 대응 사이클
-
-```
-장비 가동 (HEATING)
-  │
-  │ 과온 감지 (설정 온도(SP) + 1°C, 5초 지속)
-  ▼
-WARNING (ALM-01) ── 냉각팬 ON / 부저 간헐 경보 / EC 진단 패널 경고 표시
-  │                  PID 제어 유지, 팬 냉각으로 SP 복귀 유도
-  │
-  │ 과온 지속 (SP + 2°C, 10초 지속)
-  ▼
-ALARM (ALM-02) ──── 히터 자동 OFF / 팬 자동 ON / 부저 연속
-  │                  EC 진단 패널 원인 표시 + 복구 조건 모니터링
-  │
-  │  엔지니어 현장 대응
-  │  ① 알람 코드 확인 (ALM-01 / ALM-02)
-  │  ② 원인 분류 (과온 원인 진단 트리 — TRG-001 참조)
-  │  ③ 복구 조건 확인 (온도 ≤ SP - 2°C)
-  │  ④ EC CLI: RESET 명령 입력
-  │     → 조건 미충족: NACK:RESET,TEMP_HIGH (재가동 불가)
-  │     → 조건 충족:  ACK:RESET → IDLE 복귀
-  ▼
-정상 복귀 (IDLE) ── START 명령으로 재가동
-```
+| 구분 | 기술 |
+|------|------|
+| MCU | STM32F446RE (ARM Cortex-M4, 180MHz) |
+| FW 언어 | C |
+| RTOS | FreeRTOS 10.3.1 (CMSIS-RTOS V2) |
+| 개발 도구 | STM32CubeMX, STM32CubeIDE |
+| EC 언어 | Python 3 |
+| 통신 | UART 115200bps (ST-LINK USB VCP) |
 
 ---
 
@@ -40,32 +21,106 @@ ALARM (ALM-02) ──── 히터 자동 OFF / 팬 자동 ON / 부저 연속
 ┌──────────────────────────────────────────────────────┐
 │  EC (Equipment Controller, macOS Python)             │
 │                                                      │
-│  - 알람 진단 패널 (알람 코드 / 원인 / 복구 조건)    │
-│  - 복구 조건 실시간 모니터링 (온도 ≤ SP-2°C ✓/✗)  │
-│  - RESET 명령 허용 / 거부 피드백                    │
-│  - 센서 데이터 CSV 자동 로깅                        │
+│  - curses 실시간 진단 패널 (상태 / KPI / 알람)       │
+│  - 복구 조건 실시간 모니터링 (온도 ≤ SP-2°C ✓/✗)   │
+│  - 센서 데이터 CSV 자동 로깅                         │
 └─────────────────────┬────────────────────────────────┘
-                      │ UART 115200bps (text, \r\n)
+                      │ UART 115200bps (ASCII text, \r\n)
                       │ ST-LINK USB VCP
 ┌─────────────────────▼────────────────────────────────┐
-│  FW (STM32F446RE NUCLEO, C)                          │
+│  FW (STM32F446RE NUCLEO, C / FreeRTOS)               │
 │                                                      │
-│  - DHT22 챔버 내부 온도 측정 (PB5/D4, 2s 주기)      │
-│  - PID 히터 제어 (TIM3_CH3, 1kHz PWM)              │
-│  - WARNING / ALARM 2단계 판정 및 자동 안전 대응     │
-│  - 팬 릴레이 제어 (PA0) / 부저 제어 (PB10)        │
-│  - RESET 복구 조건 검증 후 허용 / 거부 응답         │
+│  - DHT22 온도 측정 (PB5, 2s 주기, 단선 1-Wire)       │
+│  - PI 히터 제어 (TIM3_CH3, 1kHz PWM)                │
+│  - 상태 머신: IDLE → HEATING → WARNING → ALARM       │
+│  - 팬 릴레이 (PA0) / 부저 (PB10) 자동 제어           │
+│  - RESET 복구 조건 검증 후 ACK / NACK 응답           │
 └──────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 알람 정의 (AIM-001 기준)
+## FW 소프트웨어 설계
+
+### FreeRTOS 5태스크 구조
+
+```
+ ├─[AboveNormal]─ UartRxTask   : USART2 ISR 알림 수신 → 명령 파싱 → 상태 전이
+ ├─[Normal]─────  SensorTask   : DHT22 읽기 (vTaskSuspendAll 타이밍 보호)
+ ├─[AboveNormal]─ ControlTask  : PI 제어 · KPI 계산 · 알람 판정 (센서 세마포어 동기화)
+ ├─[Normal]─────  UartTxTask   : TX Queue 소비 + 1s 주기 DATA 전송
+ └─[BelowNormal]─ ActuatorTask : 50ms 주기 부저 · LED GPIO 패턴 구동
+```
+
+| RTOS 오브젝트 | 종류 | 역할 |
+|--------------|------|------|
+| `g_state_mutex` | osMutex | 공유 상태(g_state, g_temp, KPI) 보호 |
+| `g_sensor_sem` | osSemaphore | SensorTask → ControlTask 측정 완료 신호 |
+| `g_tx_queue` | osMessageQueue (8×128B) | TX 직렬화 — 이벤트/ACK/NACK 큐잉 |
+| `g_uart_rx_task_h` | TaskHandle | ISR → UartRxTask 라인 완성 알림 |
+
+### 상태 머신
+
+```
+IDLE ──[START]──► HEATING ──[과온 > SP+1°C, 5s]──► WARNING
+                     ▲           │                      │
+                     │           │ [온도 복귀]           │ [과온 > SP+2°C, 10s]
+                     │           ◄──────────────────────┘
+                     │                                  ▼
+                     └──────────[RESET + 온도≤SP-2°C]── ALARM
+```
+
+### PI 제어 알고리즘
+
+```
+e(t) = SP − T_measured
+I(t) = clamp(I(t-1) + e(t) × dt,  −100, +100)
+u(t) = clamp(Kp × e(t) + Ki × I(t),  0, 1000)
+```
+
+- **Kp = 200, Ki = 2, Kd = 0** — DHT22 노이즈에 의한 미분 킥 방지로 D항 비활성
+- **u(t) 범위 0~1000**: TIM3_CH3 Compare 레지스터에 직접 기입 (1kHz PWM)
+- **ALARM 진입 시**: u=0 강제, 적분항 초기화
+
+### DHT22 타이밍 보호
+
+DHT22 단선 프로토콜은 µs 단위 타이밍이 필요합니다. 태스크 선점으로 인한 타이밍 깨짐을 `vTaskSuspendAll()` / `xTaskResumeAll()` 로 방지하면서, TIM14(HAL Timebase)와 USART2 IRQ는 정상 동작을 유지합니다.
+
+---
+
+## 알람 정의
 
 | ALID | 알람명 | 발생 조건 | FW 자동 대응 | 복구 |
 |------|--------|---------|------------|------|
-| ALM-01 | TEMP_WARNING | 온도 > SP + 1°C, 5초 지속 | 부저 간헐, EC WARNING 보고 | 온도 복귀 시 자동 해제 |
-| ALM-02 | TEMP_ALARM | 온도 > SP + 2°C, 10초 지속 | 히터 OFF, 팬 ON, 부저 연속 | EC RESET (수동, 복구 조건 검증) |
+| ALM-01 | TEMP_WARNING | 온도 > SP + 1°C, 5s 지속 | 팬 ON, 부저 간헐 | 온도 복귀 시 자동 해제 |
+| ALM-02 | TEMP_ALARM | 온도 > SP + 2°C, 10s 지속 | 히터 OFF, 팬 ON, 부저 연속 | RESET (온도 ≤ SP-2°C 검증 후) |
+| ALM-03 | SENSOR_FAIL | DHT22 3회 연속 실패 | 히터 OFF, ALARM 전이 | RESET |
+
+---
+
+## UART 통신 프로토콜
+
+**FW → EC (주기/이벤트):**
+
+```
+DATA:28.3,30.0,HEATING,NONE,50.0,23.1,0,0.0,0.0,0.0,0,0.0   # 1s 주기
+EVENT:WARN,ALM-01      # WARNING 발생
+EVENT:ALARM,ALM-02     # ALARM 발생
+EVENT:CLEAR,ALM-01     # 알람 해제
+EVENT:SETTLED,67.8     # 안정화 확인 (SP ± 1°C, 10s 유지)
+ACK:START              # 명령 수락
+NACK:RESET,TEMP_HIGH   # 복구 조건 미충족 거부
+```
+
+**EC → FW (명령):**
+
+```
+SET:30.0   # 온도 설정점 변경 (20°C ~ 80°C)
+START      # 가열 시작 (IDLE → HEATING)
+STOP       # 가열 정지
+RESET      # 알람 복구 시도 (조건 검증 후 ACK/NACK)
+STATUS     # 즉시 DATA 응답 요청
+```
 
 ---
 
@@ -95,41 +150,15 @@ ALARM (ALM-02) ──── 히터 자동 OFF / 팬 자동 ON / 부저 연속
 
 | 부품 | 역할 | 인터페이스 |
 |------|------|-----------|
-| 락앤락 밀폐 용기 | 챔버 본체 (환기 구멍 포함) | — |
-| STM32 NUCLEO-F446RE | 메인 MCU (180MHz) | — |
+| STM32 NUCLEO-F446RE | 메인 MCU (180MHz, Cortex-M4) | — |
 | DHT22 | 챔버 내부 온도 측정 (±0.5°C) | 단선 (PB5/D4) |
 | 카프톤 필름 히터 24V/~26W | 챔버 내부 가열 | — |
 | N-ch MOSFET 모듈 | 히터 PWM 제어 (1kHz) | PB0/A3 (TIM3_CH3) |
-| 릴레이 모듈 + 5V 팬 | 챔버 환기 냉각 (환기 구멍 통과) | PA0/A0 |
+| 릴레이 모듈 + 5V 팬 | 챔버 환기 냉각 | PA0/A0 |
 | DC-DC 컨버터 (24V→5V) | 팬 전원 | — |
 | 액티브 부저 (3.3V) | 알람 경보 | PB10/D6 |
 | WANPTEK 파워 서플라이 | 24V / 1.5A 제한 | — |
-
----
-
-## UART 통신 프로토콜
-
-**FW → EC (주기/이벤트):**
-
-```
-DATA:28.3,30.0,HEATING,NONE,50.0,23.1,0,0.0,0.0,0.0,0,0.0   # 1초 주기
-EVENT:WARN,ALM-01      # WARNING 발생
-EVENT:ALARM,ALM-02     # ALARM 발생
-EVENT:CLEAR,ALM-01     # 알람 해제
-EVENT:SETTLED,67.8     # 안정화 확인 (SP ± 1°C, 10초 유지)
-ACK:START              # 명령 수락
-NACK:RESET,TEMP_HIGH   # 복구 조건 미충족 (RESET 거부)
-```
-
-**EC → FW (명령):**
-
-```
-SET:30.0   # 온도 설정점 변경
-START      # 가열 시작 (IDLE → HEATING)
-STOP       # 가열 정지
-RESET      # 알람 복구 시도 (조건 검증 후 허용/거부)
-STATUS     # 즉시 DATA 응답 요청
-```
+| 락앤락 밀폐 용기 | 챔버 본체 (환기 구멍 포함) | — |
 
 ---
 
@@ -167,7 +196,7 @@ python chamber-ec/ec.py /dev/cu.usbmodem*
 | `SET:<온도>` | 온도 설정점 변경 (예: `SET:30.0`) |
 | `START` | 가열 시작 (IDLE → HEATING) |
 | `STOP` | 가열 정지 |
-| `RESET` | 알람 복구 시도 (복구 조건 검증 후 허용/거부) |
+| `RESET` | 알람 복구 시도 (복구 조건 검증 후 ACK/NACK) |
 | `STATUS` | 현재 상태 즉시 조회 |
 | `QUIT` | EC 종료 |
 
@@ -177,22 +206,25 @@ python chamber-ec/ec.py /dev/cu.usbmodem*
 
 ```
 equip-control/
-├── chamber-fw/                 # STM32 펌웨어 (C, HAL)
+├── chamber-fw/                 # STM32 펌웨어 (C, FreeRTOS, HAL)
 │   └── Core/Src/
-│       ├── main.c              # 상태 머신, 알람 로직, PID, UART
-│       └── dht22.c             # DHT22 온도 센서 드라이버
+│       ├── main.c              # 5태스크 구조, 상태 머신, PI 제어, UART
+│       └── dht22.c             # DHT22 단선 프로토콜 드라이버 (DWT 타이밍)
 ├── chamber-ec/                 # EC 소프트웨어 (Python)
-│   ├── ec.py                   # 진단 패널 UI, UART 통신, CSV 로깅
+│   ├── ec.py                   # curses 진단 패널 UI, UART 통신, CSV 로깅
 │   └── requirements.txt
 └── docs/
-    ├── hw/
-    │   ├── EFS-001.md          # Equipment Functional Specification
-    │   ├── HDS-001.md          # Hardware Design Specification
-    │   ├── IO-001.md           # I/O List & Wiring Diagram
-    │   ├── AIM-001.md          # Alarm / Interlock Matrix
-    │   ├── TRG-001.md          # Troubleshooting & Recovery Guide
-    │   └── TPV-001.md          # Test Plan & Verification Report
-    └── troubleshooting/        # 개발 중 트러블슈팅 기록
+    ├── sw/
+    │   ├── SRS-001.md          # 소프트웨어 요구사항 명세
+    │   ├── SDD-001.md          # 소프트웨어 설계 (태스크 구조, RTOS 오브젝트)
+    │   └── TPV-001.md          # 테스트 계획 및 검증 보고서
+    └── hw/
+        ├── EFS-001.md          # Equipment Functional Specification
+        ├── HDS-001.md          # Hardware Design Specification
+        ├── IO-001.md           # I/O List & Wiring Diagram
+        ├── AIM-001.md          # Alarm / Interlock Matrix
+        ├── TRG-001.md          # Troubleshooting & Recovery Guide
+        └── SCN-001.md          # 과온 알람 시나리오
 ```
 
 ---
@@ -203,9 +235,9 @@ equip-control/
 
 | 문서 | 내용 |
 |------|------|
-| [SRS-001](docs/hw/SRS-001.md) | 소프트웨어 요구사항 명세 — REQ-F/SW/NF 요구사항 정의 |
-| [SDD-001](docs/hw/SDD-001.md) | 소프트웨어 설계 — FreeRTOS 5태스크 구조도, RTOS 오브젝트 명세, PI 제어 알고리즘 |
-| [TPV-001](docs/hw/TPV-001.md) | 테스트 계획 및 검증 — TC-01~05, UART 송수신 예시, 요구사항-설계-시험 추적표 |
+| [SRS-001](docs/sw/SRS-001.md) | 소프트웨어 요구사항 명세 — REQ-F/SW/NF 요구사항 정의 |
+| [SDD-001](docs/sw/SDD-001.md) | 소프트웨어 설계 — FreeRTOS 5태스크 구조도, RTOS 오브젝트 명세, PI 제어 알고리즘 |
+| [TPV-001](docs/sw/TPV-001.md) | 테스트 계획 및 검증 — TC-01~05, UART 송수신 예시, 요구사항-설계-시험 추적표 |
 
 ### 시스템 / 하드웨어 문서
 
