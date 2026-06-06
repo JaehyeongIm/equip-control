@@ -6,7 +6,7 @@ STM32F446RE에 FreeRTOS를 올려 소형 챔버 온도를 PI 제어하는 펌웨
 
 | 구분 | 기술 |
 |------|------|
-| MCU | STM32F446RE (ARM Cortex-M4, 180MHz) |
+| MCU | STM32F446RE (ARM Cortex-M4, 84MHz) |
 | FW 언어 | C |
 | RTOS | FreeRTOS 10.3.1 (CMSIS-RTOS V2) |
 | 개발 도구 | STM32CubeMX, STM32CubeIDE |
@@ -150,7 +150,7 @@ STATUS     # 즉시 DATA 응답 요청
 
 | 부품 | 역할 | 인터페이스 |
 |------|------|-----------|
-| STM32 NUCLEO-F446RE | 메인 MCU (180MHz, Cortex-M4) | — |
+| STM32 NUCLEO-F446RE | 메인 MCU (84MHz, Cortex-M4) | — |
 | DHT22 | 챔버 내부 온도 측정 (±0.5°C) | 단선 (PB5/D4) |
 | 카프톤 필름 히터 24V/~26W | 챔버 내부 가열 | — |
 | N-ch MOSFET 모듈 | 히터 PWM 제어 (1kHz) | PB0/A3 (TIM3_CH3) |
