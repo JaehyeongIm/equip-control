@@ -36,7 +36,7 @@ typedef enum {
     STATE_HEATING,
     STATE_WARNING,
     STATE_ALARM
-} EquipState;
+} ChamberState;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -94,7 +94,7 @@ const osThreadAttr_t defaultTask_attributes = {
 /* USER CODE BEGIN PV */
 
 /* ── 제어 상태 (g_state_mutex로 보호) ─────────────────────────── */
-static EquipState g_state     = STATE_IDLE;
+static ChamberState g_state     = STATE_IDLE;
 static char       g_alm_id[8] = "NONE";
 
 static float    g_sp       = SP_DEFAULT;
@@ -754,7 +754,7 @@ static void SensorTask(void *arg)
             osMutexAcquire(g_state_mutex, osWaitForever);
             g_sensor_fail++;
             uint8_t    fail = g_sensor_fail;
-            EquipState st   = g_state;
+            ChamberState st   = g_state;
             osMutexRelease(g_state_mutex);
 
             if (fail >= SENSOR_FAIL_MAX && st != STATE_ALARM) {
@@ -978,7 +978,7 @@ static void ActuatorTask(void *arg)
         uint32_t now = HAL_GetTick();
 
         osMutexAcquire(g_state_mutex, osWaitForever);
-        EquipState st = g_state;
+        ChamberState st = g_state;
         osMutexRelease(g_state_mutex);
 
         /* ── 부저: ALARM=연속, WARNING=1s 토글, 그 외=OFF ──────── */

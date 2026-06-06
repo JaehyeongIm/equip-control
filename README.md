@@ -1,6 +1,6 @@
-# 챔버 과온 알람 진단 및 안전 복구 시스템
+# 챔버 온도 제어 펌웨어
 
-STM32F446RE에 FreeRTOS를 올려 챔버 온도를 PI 제어하고, 과온 발생 시 안전 차단·복구까지 수행하는 임베디드 시스템입니다. PC측 Equipment Controller(EC)와 UART로 연결해 실시간 모니터링과 명령 처리를 합니다.
+STM32F446RE에 FreeRTOS를 올려 소형 챔버 온도를 PI 제어하는 펌웨어입니다. 과온 시 히터 차단·복구 시퀀스를 수행하며, PC측 호스트 모니터(EC)와 UART로 연결해 실시간 모니터링과 명령 처리를 합니다.
 
 ## 기술 스택
 
@@ -19,9 +19,9 @@ STM32F446RE에 FreeRTOS를 올려 챔버 온도를 PI 제어하고, 과온 발�
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│  EC (Equipment Controller, macOS Python)             │
+│  EC — 호스트 모니터 (Host Monitor, macOS Python)     │
 │                                                      │
-│  - curses 실시간 진단 패널 (상태 / KPI / 알람)       │
+│  - curses 실시간 모니터 패널 (상태 / KPI / 알람)     │
 │  - 복구 조건 실시간 모니터링 (온도 ≤ SP-2°C ✓/✗)   │
 │  - 센서 데이터 CSV 자동 로깅                         │
 └─────────────────────┬────────────────────────────────┘
@@ -124,11 +124,11 @@ STATUS     # 즉시 DATA 응답 요청
 
 ---
 
-## EC 진단 패널 (ALARM 상태 예시)
+## EC 모니터 패널 (ALARM 상태 예시)
 
 ```
 ────────────────────────────────────────────────────────
- 챔버 과온 알람 진단 및 안전 복구 시스템
+ 챔버 온도 제어 펌웨어 — 호스트 모니터
 ────────────────────────────────────────────────────────
 [State]       FW: ALARM
 [Sensor]      Temperature: 32.5°C   Setpoint: 30.0°C   Duty: 0.0%
@@ -211,7 +211,7 @@ equip-control/
 │       ├── main.c              # 5태스크 구조, 상태 머신, PI 제어, UART
 │       └── dht22.c             # DHT22 단선 프로토콜 드라이버 (DWT 타이밍)
 ├── chamber-ec/                 # EC 소프트웨어 (Python)
-│   ├── ec.py                   # curses 진단 패널 UI, UART 통신, CSV 로깅
+│   ├── ec.py                   # curses 모니터 패널 UI, UART 통신, CSV 로깅
 │   └── requirements.txt
 └── docs/
     ├── sw/
@@ -223,8 +223,8 @@ equip-control/
         ├── HDS-001.md          # Hardware Design Specification
         ├── IO-001.md           # I/O List & Wiring Diagram
         ├── AIM-001.md          # Alarm / Interlock Matrix
-        ├── TRG-001.md          # Troubleshooting & Recovery Guide
-        └── SCN-001.md          # 과온 알람 시나리오
+        ├── TRG-001.md          # Fault Handling & Recovery Guide
+        └── SCN-001.md          # 과온 보호 동작 시나리오
 ```
 
 ---
@@ -243,9 +243,9 @@ equip-control/
 
 | 문서 | 내용 |
 |------|------|
-| [EFS-001](docs/hw/EFS-001.md) | 장비 기능 명세 — 상태 머신, 알람 동작, UART 프로토콜 |
+| [EFS-001](docs/hw/EFS-001.md) | 시스템 기능 명세 — 상태 머신, 알람 동작, UART 프로토콜 |
 | [HDS-001](docs/hw/HDS-001.md) | HW 설계 명세 — DHT22, MOSFET PWM 회로, 전원 아키텍처 |
 | [IO-001](docs/hw/IO-001.md) | I/O 목록 및 배선도 |
 | [AIM-001](docs/hw/AIM-001.md) | 알람 매트릭스 — ALM-01~03 발생 조건, 자동 대응, 복구 조건 |
-| [TRG-001](docs/hw/TRG-001.md) | 현장 대응 절차서 — 원인 진단 트리, 단계별 조치, 복구 검증 |
-| [SCN-001](docs/hw/SCN-001.md) | 과온 알람 시나리오 — 타임라인, 원인별 진단 방법, 복구 절차 |
+| [TRG-001](docs/hw/TRG-001.md) | 이상 처리·복구 가이드 — 이상 검출 동작, 복구 시퀀스, 벤치 브링업 점검 |
+| [SCN-001](docs/hw/SCN-001.md) | 과온 보호 검증 시나리오 — 타임라인, 원인별 분석, 복구 시퀀스 검증 |
